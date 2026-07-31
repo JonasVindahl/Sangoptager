@@ -1,0 +1,4 @@
+Læg ffmpeg.exe i denne mappe før du bygger med PyInstaller.
+
+Hent "release essentials"-zip fra: https://www.gyan.dev/ffmpeg/builds/
+og kopiér bin\ffmpeg.exe herind.

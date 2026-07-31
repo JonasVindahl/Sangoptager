@@ -1,0 +1,30 @@
+[project]
+name = "sangoptager"
+version = "1.0.0"
+description = "Optag sang + melodi direkte til MP3 — erstatter OBS + VLC + script"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.7",
+    "mutagen>=1.47",
+    "numpy>=1.26",
+    "PyAudioWPatch>=0.2.12; sys_platform == 'win32'",
+    "sounddevice>=0.4.6; sys_platform != 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+build = [
+    "pyinstaller>=6.0",
+]
+
+[project.gui-scripts]
+sangoptager = "sangoptager.app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["sangoptager*"]

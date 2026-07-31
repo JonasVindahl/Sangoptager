@@ -1,0 +1,264 @@
+"""Custom widgets: pro-audio niveaumeter med peak-hold, balance-slider og
+den store optage-knap med pulserende REC-indikator."""
+
+from __future__ import annotations
+
+import math
+
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
+
+from . import theme
+
+# ── Niveaumeter ──────────────────────────────────────────────────────────────
+
+
+class _MeterBar(QWidget):
+    """Selve bjælken: gradient-fyld + hvid peak-hold-streg."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._level = 0.0   # vist niveau 0..1 (perceptuelt)
+        self._peak = 0.0
+        self.setMinimumHeight(16)
+        self.setSizePolicy(self.sizePolicy().horizontalPolicy(),
+                           self.sizePolicy().verticalPolicy())
+
+    def set_level(self, rms: float):
+        disp = math.sqrt(min(1.0, max(0.0, rms)))
+        self._level = disp
+        # Peak-hold der falder langsomt (kaldes ca. hver 80 ms)
+        self._peak = max(disp, self._peak - 0.012)
+        self.update()
+
+    def reset(self):
+        if self._level == 0.0 and self._peak == 0.0:
+            return
+        self._level = 0.0
+        self._peak = 0.0
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, 5, 5)
+        painter.setClipPath(path)
+
+        painter.fillRect(rect, QColor(theme.SURFACE_2))
+
+        if self._level > 0.003:
+            grad = QLinearGradient(rect.left(), 0, rect.right(), 0)
+            for stop, color in theme.METER_GRADIENT:
+                grad.setColorAt(stop, QColor(color))
+            fill = QRectF(rect)
+            fill.setWidth(rect.width() * self._level)
+            painter.fillRect(fill, grad)
+
+        if self._peak > 0.01:
+            x = rect.left() + rect.width() * self._peak
+            painter.fillRect(QRectF(x - 1.5, rect.top(), 2.5, rect.height()),
+                             QColor(255, 255, 255, 190))
+
+        painter.setClipping(False)
+        painter.setPen(QColor(theme.BORDER))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(rect, 5, 5)
+
+
+class LevelMeter(QWidget):
+    """Navn + bjælke + dB-udlæsning, f.eks.  Stemme ▓▓▓▓░░░░  -18 dB"""
+
+    def __init__(self, label: str, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        self._name = QLabel(label)
+        self._name.setObjectName("meterName")
+        self._name.setMinimumWidth(64)
+        layout.addWidget(self._name)
+
+        self._bar = _MeterBar()
+        layout.addWidget(self._bar, stretch=1)
+
+        self._db = QLabel("–∞ dB")
+        self._db.setObjectName("meterDb")
+        self._db.setMinimumWidth(52)
+        self._db.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(self._db)
+
+    def set_level(self, rms: float):
+        self._bar.set_level(rms)
+        if rms > 0.0005:
+            self._db.setText(f"{max(-60, 20 * math.log10(rms)):.0f} dB")
+        else:
+            self._db.setText("–∞ dB")
+
+    def reset(self):
+        self._bar.reset()
+        self._db.setText("–∞ dB")
+
+    def set_enabled_look(self, enabled: bool):
+        for widget in (self._name, self._bar, self._db):
+            widget.setEnabled(enabled)
+        if not enabled:
+            self._db.setText("—")
+
+
+# ── Balance ──────────────────────────────────────────────────────────────────
+
+
+class BalanceSlider(QWidget):
+    """'Melodi ── ● ── Stemme' med procent-udlæsning. Værdi 0..1 (1 = stemme)."""
+
+    def __init__(self, value: float = 0.5, parent=None):
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+
+        header = QHBoxLayout()
+        title = QLabel("Lydbalance")
+        title.setObjectName("meterName")
+        header.addWidget(title)
+        header.addStretch(1)
+        self._value_label = QLabel("")
+        self._value_label.setObjectName("balanceValue")
+        header.addWidget(self._value_label)
+        outer.addLayout(header)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        left = QLabel("Melodi")
+        left.setObjectName("hintLabel")
+        row.addWidget(left)
+
+        self._slider = QSlider(Qt.Horizontal)
+        self._slider.setRange(0, 100)
+        self._slider.setValue(int(value * 100))
+        self._slider.valueChanged.connect(self._update_label)
+        row.addWidget(self._slider, stretch=1)
+
+        right = QLabel("Stemme")
+        right.setObjectName("hintLabel")
+        row.addWidget(right)
+        outer.addLayout(row)
+
+        self._update_label()
+
+    def _update_label(self):
+        voice = self._slider.value()
+        if voice == 50:
+            self._value_label.setText("neutral")
+        else:
+            self._value_label.setText(f"{100 - voice} · {voice}")
+
+    @property
+    def value(self) -> float:
+        return self._slider.value() / 100.0
+
+    def set_value(self, value: float):
+        self._slider.setValue(int(min(1.0, max(0.0, value)) * 100))
+
+    @property
+    def valueChanged(self):
+        return self._slider.valueChanged
+
+
+# ── Optage-knap ──────────────────────────────────────────────────────────────
+
+
+class RecordButton(QPushButton):
+    """Stor tilstandsknap: idle → recording (pulserende dot) → resolve/busy."""
+
+    _STATES = {
+        "idle":      dict(bg="#2a3038", bg_hover="#333a44", text_color=theme.TEXT,
+                          label="Optag", dot=theme.RED),
+        "recording": dict(bg=theme.RED, bg_hover="#ef5a5f", text_color="white",
+                          label="Stop", dot="white"),
+        "resolve":   dict(bg=theme.AMBER, bg_hover="#ffb84d", text_color="#1b1f24",
+                          label="Gem eller slet optagelsen", dot="#1b1f24"),
+        "busy":      dict(bg=theme.SURFACE, bg_hover=theme.SURFACE,
+                          text_color=theme.SUBTEXT, label="Gemmer…", dot=None),
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.state = "idle"
+        self._phase = 0.0
+        self.setMinimumHeight(72)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+
+        self._pulse = QTimer(self)
+        self._pulse.setInterval(40)
+        self._pulse.timeout.connect(self._tick)
+
+    def set_state(self, state: str):
+        self.state = state
+        if state == "recording":
+            self._pulse.start()
+        else:
+            self._pulse.stop()
+        self.setEnabled(state != "busy")
+        self.update()
+
+    def _tick(self):
+        self._phase += 0.18
+        self.update()
+
+    def paintEvent(self, event):
+        conf = self._STATES[self.state]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        bg = QColor(conf["bg_hover"] if (self.underMouse() and self.isEnabled())
+                    else conf["bg"])
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, 14, 14)
+
+        font = painter.font()
+        font.setPointSizeF(15)
+        font.setBold(True)
+        painter.setFont(font)
+
+        label = conf["label"]
+        metrics = painter.fontMetrics()
+        text_w = metrics.horizontalAdvance(label)
+
+        dot_r = 7.0
+        gap = 12.0
+        has_dot = conf["dot"] is not None
+        group_w = text_w + (dot_r * 2 + gap if has_dot else 0)
+        x = rect.center().x() - group_w / 2
+
+        if has_dot:
+            dot_color = QColor(conf["dot"])
+            if self.state == "recording":
+                alpha = 0.45 + 0.55 * (0.5 + 0.5 * math.sin(self._phase))
+                dot_color.setAlphaF(alpha)
+            painter.setBrush(dot_color)
+            cy = rect.center().y()
+            if self.state == "recording":
+                painter.drawRoundedRect(QRectF(x, cy - dot_r, dot_r * 2, dot_r * 2), 3, 3)
+            else:
+                painter.drawEllipse(QRectF(x, cy - dot_r, dot_r * 2, dot_r * 2))
+            x += dot_r * 2 + gap
+
+        painter.setPen(QColor(conf["text_color"]))
+        painter.drawText(QRectF(x, rect.top(), text_w + 4, rect.height()),
+                         Qt.AlignVCenter | Qt.AlignLeft, label)
