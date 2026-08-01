@@ -132,10 +132,12 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(16, 14, 16, 12)
         layout.setSpacing(12)
+        self._root_layout = layout
 
         header = QHBoxLayout()
         title = QLabel("Sangoptager")
         title.setObjectName("titleLabel")
+        self._title_label = title
         header.addWidget(title)
         header.addStretch(1)
         gear = QPushButton("⚙")
@@ -168,6 +170,7 @@ class MainWindow(QMainWindow):
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(14, 14, 14, 14)
         card_layout.setSpacing(12)
+        self._card_layout = card_layout
 
         self.mic_meter = LevelMeter("Stemme")
         self.loop_meter = LevelMeter("Melodi")
@@ -184,6 +187,34 @@ class MainWindow(QMainWindow):
         self.status.showMessage("Klar")
 
         QShortcut(QKeySequence(Qt.Key_Space), self, activated=self._toggle)
+
+        self._scale = 1.0
+        self._apply_scale(1.0)
+
+    # ── Proportional skalering ─────────────────────────────────────────────
+
+    _BASE_HEIGHT = 430  # design-højden; skalafaktor = vindueshøjde / denne
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        s = min(1.7, max(0.9, self.height() / self._BASE_HEIGHT))
+        if abs(s - self._scale) > 0.03:
+            self._scale = s
+            self._apply_scale(s)
+
+    def _apply_scale(self, s: float):
+        """Skalér typografi, metre og luft, så appens proportioner holder."""
+        self._title_label.setStyleSheet(f"font-size: {round(16 * s)}px;")
+        self.device_label.setStyleSheet(f"font-size: {round(11 * s)}px;")
+        self.timer_label.setStyleSheet(f"font-size: {round(40 * s)}px;")
+        self.mic_meter.set_scale(s)
+        self.loop_meter.set_scale(s)
+        self.balance.set_scale(s)
+        self._root_layout.setContentsMargins(
+            round(16 * s), round(14 * s), round(16 * s), round(12 * s))
+        self._root_layout.setSpacing(round(12 * s))
+        self._card_layout.setContentsMargins(*(round(14 * s),) * 4)
+        self._card_layout.setSpacing(round(12 * s))
 
     def _open_settings(self):
         mics = self.recorder.list_mics() if self.recorder else []

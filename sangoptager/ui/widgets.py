@@ -98,6 +98,14 @@ class LevelMeter(QWidget):
         self._db.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(self._db)
 
+    def set_scale(self, s: float):
+        """Skalér bjælkehøjde og typografi med vinduets skalafaktor."""
+        self._bar.setFixedHeight(round(16 * s))
+        self._name.setMinimumWidth(round(64 * s))
+        self._name.setStyleSheet(f"font-size: {round(12 * s)}px;")
+        self._db.setMinimumWidth(round(52 * s))
+        self._db.setStyleSheet(f"font-size: {round(11 * s)}px;")
+
     def set_level(self, rms: float):
         self._bar.set_level(rms)
         if rms > 0.0005:
@@ -140,9 +148,9 @@ class BalanceSlider(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(10)
-        left = QLabel("Melodi")
-        left.setObjectName("hintLabel")
-        row.addWidget(left)
+        self._left = QLabel("Melodi")
+        self._left.setObjectName("hintLabel")
+        row.addWidget(self._left)
 
         self._slider = QSlider(Qt.Horizontal)
         self._slider.setRange(0, 100)
@@ -150,12 +158,19 @@ class BalanceSlider(QWidget):
         self._slider.valueChanged.connect(self._update_label)
         row.addWidget(self._slider, stretch=1)
 
-        right = QLabel("Stemme")
-        right.setObjectName("hintLabel")
-        row.addWidget(right)
+        self._right = QLabel("Stemme")
+        self._right.setObjectName("hintLabel")
+        row.addWidget(self._right)
         outer.addLayout(row)
 
+        self._title = title
         self._update_label()
+
+    def set_scale(self, s: float):
+        self._title.setStyleSheet(f"font-size: {round(12 * s)}px;")
+        self._value_label.setStyleSheet(f"font-size: {round(11 * s)}px;")
+        for side in (self._left, self._right):
+            side.setStyleSheet(f"font-size: {round(11 * s)}px;")
 
     def _update_label(self):
         voice = self._slider.value()
