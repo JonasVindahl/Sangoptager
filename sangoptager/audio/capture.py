@@ -51,6 +51,7 @@ class _WavWriter:
         self._lock = threading.Lock()
         self._closed = False
         self.level = 0.0
+        self.max_level = 0.0  # højeste RMS i hele optagelsen (til stilheds-tjek)
 
     def write(self, data: bytes):
         with self._lock:
@@ -58,6 +59,7 @@ class _WavWriter:
                 self._wf.writeframes(data)
         raw = _rms_level(data)
         self.level = max(raw, self.level * _METER_DECAY)
+        self.max_level = max(raw, self.max_level)
 
     def close(self):
         with self._lock:
@@ -67,10 +69,14 @@ class _WavWriter:
 
 
 class RecordingResult:
-    def __init__(self, mic_path: str | None, loop_path: str | None, duration: float):
+    def __init__(self, mic_path: str | None, loop_path: str | None, duration: float,
+                 mic_peak: float | None = None, loop_peak: float | None = None):
         self.mic_path = mic_path
         self.loop_path = loop_path
         self.duration = duration
+        # Højeste RMS pr. spor; None = ukendt (fx gendannet efter crash)
+        self.mic_peak = mic_peak
+        self.loop_peak = loop_peak
 
 
 class CaptureError(RuntimeError):
@@ -132,8 +138,9 @@ class DualRecorder:
         if self._start_time is not None:
             self._duration = time.monotonic() - self._start_time
             self._start_time = None
-        mic_path, loop_path = self._backend.stop()
-        return RecordingResult(mic_path, loop_path, self._duration)
+        mic_path, loop_path, mic_peak, loop_peak = self._backend.stop()
+        return RecordingResult(mic_path, loop_path, self._duration,
+                               mic_peak, loop_peak)
 
     def close(self):
         self._backend.close()
@@ -279,12 +286,14 @@ class _WindowsBackend:
         for writer in self._writers:
             writer.close()
         mic_path, loop_path = self._mic_path, self._loop_path
+        mic_peak = self._mic_writer.max_level if self._mic_writer else None
+        loop_peak = self._loop_writer.max_level if self._loop_writer else None
         self._writers.clear()
         self._mic_writer = None
         self._loop_writer = None
         self._mic_path = None
         self._loop_path = None
-        return mic_path, loop_path
+        return mic_path, loop_path, mic_peak, loop_peak
 
     def close(self):
         self.stop()
@@ -370,12 +379,14 @@ class _DevBackend:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+        mic_peak = None
         if self._mic_writer is not None:
+            mic_peak = self._mic_writer.max_level
             self._mic_writer.close()
             self._mic_writer = None
         path = self._mic_path
         self._mic_path = None
-        return path, None
+        return path, None, mic_peak, None
 
     def close(self):
         self.stop()

@@ -58,6 +58,42 @@ def test_mix_single_track(tmp_path):
     assert os.path.getsize(mixdown(mic, None, out)) > 1000
 
 
+def test_mix_without_normalize(tmp_path):
+    mic = str(tmp_path / "mic.wav")
+    out = str(tmp_path / "ud.mp3")
+    _write_sine(mic, 440, 44100)
+    assert os.path.getsize(mixdown(mic, None, out, normalize=False)) > 1000
+
+
+def test_normalize_lifts_quiet_recording(tmp_path):
+    """En meget stille optagelse skal komme ud væsentligt kraftigere."""
+    import subprocess
+
+    mic = str(tmp_path / "mic.wav")
+    _write_sine(mic, 440, 44100, seconds=3.0)
+
+    # Dæmp kildesignalet kraftigt (-30 dB) og mix med/uden normalisering
+    quiet = str(tmp_path / "quiet.wav")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", mic,
+                    "-af", "volume=-30dB", quiet], check=True)
+
+    def mean_volume(path):
+        out = subprocess.run(
+            ["ffmpeg", "-i", path, "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True, text=True,
+        ).stderr
+        for line in out.splitlines():
+            if "mean_volume" in line:
+                return float(line.split("mean_volume:")[1].split("dB")[0])
+        raise AssertionError("volumedetect gav intet resultat")
+
+    raw = str(tmp_path / "raw.mp3")
+    norm = str(tmp_path / "norm.mp3")
+    mixdown(quiet, None, raw, normalize=False)
+    mixdown(quiet, None, norm, normalize=True)
+    assert mean_volume(norm) > mean_volume(raw) + 10  # mindst 10 dB løft
+
+
 def test_mix_no_tracks_raises(tmp_path):
     from sangoptager.audio.mixdown import MixdownError
 

@@ -33,6 +33,7 @@ class Settings:
     mic_device: str | None = None   # None = systemets standard
     loop_device: str | None = None  # None = standard-højttaler
     window_geometry: str = ""       # QMainWindow.saveGeometry() som hex
+    normalize: bool = True          # EBU R128 loudness-normalisering ved gem
 
     @property
     def path(self) -> str:
@@ -47,7 +48,7 @@ class Settings:
         except (OSError, ValueError):
             return settings
         for key in ("output_dir", "artist", "balance", "mic_device",
-                    "loop_device", "window_geometry"):
+                    "loop_device", "window_geometry", "normalize"):
             if key in data:
                 setattr(settings, key, data[key])
         settings.balance = min(1.0, max(0.0, float(settings.balance)))

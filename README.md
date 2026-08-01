@@ -15,9 +15,14 @@ så det eksisterende bibliotek ikke knækker.
 4. Filen lander i `<sync-mappe>\ÅÅÅÅ-MM\` og synkroniseres af Nextcloud/Syncthing.
 
 Lydbalancen kan justeres både under optagelsen og i gem-dialogen — mixet sker
-først når der trykkes Gem. Crasher noget undervejs, ligger de rå spor stadig
-klar, og appen tilbyder at gemme dem næste gang den åbnes.
-Mellemrumstasten starter/stopper også optagelsen.
+først når der trykkes Gem. **▶ Lyt** i gem-dialogen afspiller mixet med den
+valgte balance, før der gemmes. Var stemmen eller melodien nær-stille under
+optagelsen (glemt mikrofon, musikken spillede ikke), advarer dialogen, før
+der gemmes. Alle sange loudness-normaliseres (EBU R128, kan slås fra i ⚙),
+så afspilningslisten ikke hopper i lydstyrke. Crasher noget undervejs, ligger
+de rå spor stadig klar, og appen tilbyder at gemme dem næste gang den åbnes.
+Mellemrumstasten starter/stopper også optagelsen. Fejlsøgning:
+`%APPDATA%\Sangoptager\app.log`.
 
 Indstillinger (⚙): valg af **mikrofon** og **melodikilde** (hvilken højttaler
 melodien afspilles på), sync-mappe og kunstnernavn. Gemmes i

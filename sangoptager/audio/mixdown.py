@@ -57,16 +57,22 @@ def balance_gains(balance: float) -> tuple[float, float]:
     return mic_gain * scale, loop_gain * scale
 
 
+# EBU R128: -16 LUFS passer godt til musik på almindelige afspillere
+_LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"
+
+
 def mixdown(
     mic_wav: str | None,
     loop_wav: str | None,
     out_mp3: str,
     balance: float = 0.5,
+    normalize: bool = True,
 ) -> str:
     """Mix (eller konvertér et enkelt spor) til MP3. Returnerer stien.
 
-    WAV-filerne røres ikke — kald selv cleanup bagefter, når MP3'en er
-    verificeret.
+    normalize=True kører EBU R128 loudness-normalisering, så alle sange
+    ender med samme oplevede lydstyrke. WAV-filerne røres ikke — kald selv
+    cleanup bagefter, når MP3'en er verificeret.
     """
     inputs = [p for p in (mic_wav, loop_wav) if p and os.path.isfile(p)]
     if not inputs:
@@ -74,6 +80,7 @@ def mixdown(
 
     ffmpeg = find_ffmpeg()
     mic_gain, loop_gain = balance_gains(balance)
+    finisher = _LOUDNORM if normalize else "alimiter=limit=0.97"
 
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
     for path in inputs:
@@ -84,10 +91,10 @@ def mixdown(
             f"[0:a]volume={mic_gain:.4f}[voc];"
             f"[1:a]volume={loop_gain:.4f}[mel];"
             "[voc][mel]amix=inputs=2:duration=longest:normalize=0,"
-            "alimiter=limit=0.97"
+            + finisher
         )
     else:
-        filt = "alimiter=limit=0.97"
+        filt = finisher
 
     cmd += [
         "-filter_complex", filt,

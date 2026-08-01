@@ -29,6 +29,7 @@ from ..audio.capture import (
 )
 from ..audio.mixdown import MixdownError, mixdown
 from ..library import album_folder, build_filename, retag_folder
+from ..logsetup import log
 from ..settings import Settings, temp_recording_dir
 from .save_dialog import SaveDialog
 from .settings_dialog import SettingsDialog
@@ -58,7 +59,7 @@ class SaveWorker(QThread):
 
             tmp_mp3 = os.path.join(temp_recording_dir(), "mix.mp3")
             mixdown(self._result.mic_path, self._result.loop_path,
-                    tmp_mp3, self._balance)
+                    tmp_mp3, self._balance, self._settings.normalize)
 
             dest = os.path.join(dest_dir, build_filename(self._title, now))
             shutil.move(tmp_mp3, dest)
@@ -67,8 +68,11 @@ class SaveWorker(QThread):
 
             # Først NU er det sikkert at rydde de rå spor op
             _cleanup_temp()
+            log.info("Gemt '%s' → %s (balance=%.2f, normalize=%s)",
+                     self._title, dest, self._balance, self._settings.normalize)
             self.done.emit(f"✓ Gemt — {total} sange i {album}")
         except (MixdownError, OSError) as exc:
+            log.error("Gem fejlede for '%s': %s", self._title, exc)
             self.failed.emit(str(exc))
 
 
@@ -238,6 +242,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # manglende driver/enhed må ikke crashe appen
             self.recorder = None
             self.device_label.setText(f"⚠ Lydfejl: {exc}")
+            log.error("Kunne ikke initialisere lydsystemet: %s", exc)
 
     # ── Live-opdatering ────────────────────────────────────────────────────
 
@@ -289,21 +294,25 @@ class MainWindow(QMainWindow):
         self._elapsed = 0.0
         self.record_btn.set_state("recording")
         self.status.showMessage("Optager…")
+        log.info("Optagelse startet (%s)", self.recorder.device_summary())
 
     def _stop_recording(self):
         self.pending = self.recorder.stop()
         self.recording = False
         self.record_btn.set_state("idle")
         self.status.showMessage("Optagelse stoppet")
+        log.info("Optagelse stoppet: %.1f sek, peak stemme=%s melodi=%s",
+                 self.pending.duration, self.pending.mic_peak,
+                 self.pending.loop_peak)
         self._resolve_pending()
 
     def _resolve_pending(self):
         if self.pending is None:
             return
         dialog = SaveDialog(
+            result=self.pending,
             balance=self.settings.balance,
-            duration=self.pending.duration,
-            has_loopback=self.pending.loop_path is not None,
+            normalize=self.settings.normalize,
             parent=self,
         )
         dialog.exec()

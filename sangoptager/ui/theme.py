@@ -166,6 +166,17 @@ QSlider::handle:horizontal {{
 }}
 QSlider::handle:horizontal:hover {{ background: white; }}
 
+QCheckBox {{ spacing: 8px; }}
+QCheckBox::indicator {{
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    border: 1px solid {BORDER};
+    background: {SURFACE_2};
+}}
+QCheckBox::indicator:hover {{ border-color: {SUBTEXT}; }}
+QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+
 QStatusBar {{
     background: {SURFACE};
     border-top: 1px solid {BORDER};

@@ -7,6 +7,7 @@ import os
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -74,6 +75,10 @@ class SettingsDialog(QDialog):
         self._artist_edit = QLineEdit(settings.artist)
         form.addRow("Kunstner (MP3-tag):", self._artist_edit)
 
+        self._normalize_check = QCheckBox("Ensart lydstyrke på tværs af sange (anbefalet)")
+        self._normalize_check.setChecked(settings.normalize)
+        form.addRow("Lydstyrke:", self._normalize_check)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Gem")
         buttons.button(QDialogButtonBox.Ok).setObjectName("primary")
@@ -107,5 +112,6 @@ class SettingsDialog(QDialog):
         self._settings.loop_device = new_loop
         self._settings.output_dir = self._dir_edit.text().strip()
         self._settings.artist = self._artist_edit.text().strip() or "Far"
+        self._settings.normalize = self._normalize_check.isChecked()
         self._settings.save()
         self.accept()
