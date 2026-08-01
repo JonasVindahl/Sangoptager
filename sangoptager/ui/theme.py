@@ -166,6 +166,16 @@ QSlider::handle:horizontal {{
 }}
 QSlider::handle:horizontal:hover {{ background: white; }}
 
+QWidget#updateBanner {{
+    background: rgba(76, 141, 255, 0.12);
+    border: 1px solid {ACCENT};
+    border-radius: 10px;
+}}
+QLabel#updateLabel {{
+    color: {TEXT};
+    font-weight: 600;
+}}
+
 QCheckBox {{ spacing: 8px; }}
 QCheckBox::indicator {{
     width: 18px;

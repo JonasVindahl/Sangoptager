@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import os
 import shutil
+import sys
 import wave
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
@@ -31,6 +32,13 @@ from ..audio.mixdown import MixdownError, mixdown
 from ..library import album_folder, build_filename, retag_folder
 from ..logsetup import log
 from ..settings import Settings, temp_recording_dir
+from ..update import (
+    UpdateCheckWorker,
+    UpdateDownloadWorker,
+    UpdateInfo,
+    can_self_update,
+    launch_updater,
+)
 from .save_dialog import SaveDialog
 from .settings_dialog import SettingsDialog
 from .widgets import BalanceSlider, LevelMeter, RecordButton
@@ -124,6 +132,11 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(200, self._offer_recovery)
 
+        self._update_check: UpdateCheckWorker | None = None
+        self._update_dl: UpdateDownloadWorker | None = None
+        if can_self_update():
+            QTimer.singleShot(3000, self._check_updates)
+
     # ── UI ──────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -158,6 +171,21 @@ class MainWindow(QMainWindow):
         self.device_label.setObjectName("deviceLabel")
         self.device_label.setWordWrap(True)
         layout.addWidget(self.device_label)
+
+        # Opdaterings-banner — skjult indtil en ny version er fundet
+        self.update_banner = QWidget()
+        self.update_banner.setObjectName("updateBanner")
+        banner_layout = QHBoxLayout(self.update_banner)
+        banner_layout.setContentsMargins(12, 8, 8, 8)
+        self.update_label = QLabel("")
+        self.update_label.setObjectName("updateLabel")
+        banner_layout.addWidget(self.update_label, stretch=1)
+        self.update_btn = QPushButton("Opdatér nu")
+        self.update_btn.setObjectName("primary")
+        self.update_btn.clicked.connect(self._start_update)
+        banner_layout.addWidget(self.update_btn)
+        self.update_banner.hide()
+        layout.addWidget(self.update_banner)
 
         self.record_btn = RecordButton()
         self.record_btn.clicked.connect(self._toggle)
@@ -358,6 +386,44 @@ class MainWindow(QMainWindow):
             self, "Kunne ikke gemme",
             f"{message}\n\nOptagelsen er ikke slettet — prøv at gemme igen.",
         )
+
+    # ── Selv-opdatering ────────────────────────────────────────────────────
+
+    def _check_updates(self):
+        self._update_check = UpdateCheckWorker(self)
+        self._update_check.found.connect(self._update_found)
+        self._update_check.start()
+
+    def _update_found(self, info: UpdateInfo):
+        self._update_info = info
+        self.update_label.setText(f"Ny version {info.tag} er klar")
+        self.update_btn.setEnabled(True)
+        self.update_banner.show()
+
+    def _start_update(self):
+        if self.recording or self.pending is not None or (
+                self._worker is not None and self._worker.isRunning()):
+            self.status.showMessage(
+                "Gør optagelsen færdig først — opdatér bagefter")
+            return
+        self.update_btn.setEnabled(False)
+        self.update_label.setText("Henter opdatering… 0%")
+        self._update_dl = UpdateDownloadWorker(self._update_info, self)
+        self._update_dl.progress.connect(
+            lambda pct: self.update_label.setText(f"Henter opdatering… {pct}%"))
+        self._update_dl.ready.connect(self._apply_update)
+        self._update_dl.failed.connect(self._update_failed)
+        self._update_dl.start()
+
+    def _apply_update(self, new_dir: str, tmp_root: str):
+        self.update_label.setText("Genstarter…")
+        launch_updater(new_dir, tmp_root)
+        self.close()
+
+    def _update_failed(self, message: str):
+        self.update_label.setText("Opdatering mislykkedes — prøver igen næste gang")
+        self.update_btn.setEnabled(True)
+        self.status.showMessage(f"⚠ Opdatering: {message}")
 
     # ── Gendannelse efter crash ────────────────────────────────────────────
 

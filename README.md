@@ -24,6 +24,11 @@ de rå spor stadig klar, og appen tilbyder at gemme dem næste gang den åbnes.
 Mellemrumstasten starter/stopper også optagelsen. Fejlsøgning:
 `%APPDATA%\Sangoptager\app.log`.
 
+**Selv-opdatering:** Appen tjekker GitHub Releases ved opstart. Er der en ny
+version, vises et banner med "Opdatér nu" — appen downloader, udskifter sig
+selv og genstarter. Kræver kun at appen ligger i en mappe, brugeren kan
+skrive i (fx `C:\Sangoptager`), ikke `C:\Program Files`.
+
 Indstillinger (⚙): valg af **mikrofon** og **melodikilde** (hvilken højttaler
 melodien afspilles på), sync-mappe og kunstnernavn. Gemmes i
 `%APPDATA%\Sangoptager\config.json`. Skift til Syncthing = peg bare
