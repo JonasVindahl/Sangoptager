@@ -1,6 +1,6 @@
 [project]
 name = "sangoptager"
-version = "1.0.0"
+version = "1.0.1"
 description = "Optag sang + melodi direkte til MP3 — erstatter OBS + VLC + script"
 requires-python = ">=3.11"
 dependencies = [

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -28,9 +29,7 @@ class _MeterBar(QWidget):
         super().__init__(parent)
         self._level = 0.0   # vist niveau 0..1 (perceptuelt)
         self._peak = 0.0
-        self.setMinimumHeight(16)
-        self.setSizePolicy(self.sizePolicy().horizontalPolicy(),
-                           self.sizePolicy().verticalPolicy())
+        self.setFixedHeight(16)
 
     def set_level(self, rms: float):
         disp = math.sqrt(min(1.0, max(0.0, rms)))
@@ -199,6 +198,7 @@ class RecordButton(QPushButton):
         self.state = "idle"
         self._phase = 0.0
         self.setMinimumHeight(72)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
 
@@ -229,10 +229,14 @@ class RecordButton(QPushButton):
                     else conf["bg"])
         painter.setPen(Qt.NoPen)
         painter.setBrush(bg)
-        painter.drawRoundedRect(rect, 14, 14)
+        radius = min(14.0, rect.height() * 0.18)
+        painter.drawRoundedRect(rect, radius, radius)
 
+        # Typografi og dot skalerer med knappens højde, så knappen kan vokse
+        # med vinduet uden at indholdet ser fortabt ud
+        height = rect.height()
         font = painter.font()
-        font.setPointSizeF(15)
+        font.setPointSizeF(min(24.0, max(15.0, height * 0.20)))
         font.setBold(True)
         painter.setFont(font)
 
@@ -240,8 +244,8 @@ class RecordButton(QPushButton):
         metrics = painter.fontMetrics()
         text_w = metrics.horizontalAdvance(label)
 
-        dot_r = 7.0
-        gap = 12.0
+        dot_r = min(11.0, max(7.0, height * 0.10))
+        gap = dot_r + 5.0
         has_dot = conf["dot"] is not None
         group_w = text_w + (dot_r * 2 + gap if has_dot else 0)
         x = rect.center().x() - group_w / 2
@@ -254,7 +258,10 @@ class RecordButton(QPushButton):
             painter.setBrush(dot_color)
             cy = rect.center().y()
             if self.state == "recording":
-                painter.drawRoundedRect(QRectF(x, cy - dot_r, dot_r * 2, dot_r * 2), 3, 3)
+                painter.drawRoundedRect(
+                    QRectF(x, cy - dot_r, dot_r * 2, dot_r * 2),
+                    dot_r * 0.4, dot_r * 0.4,
+                )
             else:
                 painter.drawEllipse(QRectF(x, cy - dot_r, dot_r * 2, dot_r * 2))
             x += dot_r * 2 + gap

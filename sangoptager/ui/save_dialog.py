@@ -64,6 +64,9 @@ class SaveDialog(QDialog):
         self._title_edit.returnPressed.connect(self._on_save)
         self._title_edit.setFocus()
 
+        # Kun bredden må trækkes — højden følger indholdet
+        self.setFixedHeight(self.sizeHint().height())
+
     def _on_save(self):
         title = sanitize_title(self._title_edit.text())
         if not title:

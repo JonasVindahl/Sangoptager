@@ -104,6 +104,13 @@ class MainWindow(QMainWindow):
         self._elapsed = 0.0
 
         self._build_ui()
+        if self.settings.window_geometry:
+            try:
+                self.restoreGeometry(
+                    bytes.fromhex(self.settings.window_geometry)
+                )
+            except ValueError:
+                pass
         self._init_recorder()
 
         self._poll = QTimer(self)
@@ -118,7 +125,7 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         self.setWindowTitle("Sangoptager")
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
-        self.setMinimumWidth(440)
+        self.setMinimumSize(420, 380)
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -148,7 +155,8 @@ class MainWindow(QMainWindow):
 
         self.record_btn = RecordButton()
         self.record_btn.clicked.connect(self._toggle)
-        layout.addWidget(self.record_btn)
+        # stretch=1: al ekstra lodret plads ved resize går til optage-knappen
+        layout.addWidget(self.record_btn, 1)
 
         self.timer_label = QLabel("00:00")
         self.timer_label.setObjectName("timerLabel")
@@ -334,6 +342,8 @@ class MainWindow(QMainWindow):
     # ── Luk ────────────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        self.settings.window_geometry = bytes(self.saveGeometry()).hex()
+        self.settings.save()
         if self.recording and self.recorder:
             self.pending = self.recorder.stop()
             self.recording = False
