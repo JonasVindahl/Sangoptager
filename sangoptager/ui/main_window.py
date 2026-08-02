@@ -31,6 +31,7 @@ from ..audio.capture import (
 from ..audio.mixdown import MixdownError, mixdown
 from ..library import album_folder, build_filename, retag_folder
 from ..logsetup import log
+from ..rawarchive import archive_recording
 from ..settings import Settings, temp_recording_dir
 from ..update import (
     UpdateCheckWorker,
@@ -67,17 +68,28 @@ class SaveWorker(QThread):
 
             tmp_mp3 = os.path.join(temp_recording_dir(), "mix.mp3")
             mixdown(self._result.mic_path, self._result.loop_path,
-                    tmp_mp3, self._balance, self._settings.normalize)
+                    tmp_mp3, self._balance, self._settings.normalize,
+                    self._result.offset_ms)
 
             dest = os.path.join(dest_dir, build_filename(self._title, now))
             shutil.move(tmp_mp3, dest)
 
             total = retag_folder(dest_dir, album, self._settings.artist)
 
-            # Først NU er det sikkert at rydde de rå spor op
+            # MP3'en er på plads — flyt de rå spor til "sort boks"-arkivet,
+            # så en skæv optagelse kan re-mixes i stedet for at synges om
+            archive_recording(
+                self._result.mic_path, self._result.loop_path,
+                now.strftime("%Y-%m-%d_%H-%M-%S_") + self._title,
+                dict(titel=self._title, destination=dest,
+                     balance=self._balance, normalize=self._settings.normalize,
+                     offset_ms=self._result.offset_ms,
+                     overflows=self._result.overflows),
+            )
             _cleanup_temp()
-            log.info("Gemt '%s' → %s (balance=%.2f, normalize=%s)",
-                     self._title, dest, self._balance, self._settings.normalize)
+            log.info("Gemt '%s' → %s (balance=%.2f, normalize=%s, offset=%s)",
+                     self._title, dest, self._balance,
+                     self._settings.normalize, self._result.offset_ms)
             self.done.emit(f"✓ Gemt — {total} sange i {album}")
         except (MixdownError, OSError) as exc:
             log.error("Gem fejlede for '%s': %s", self._title, exc)
@@ -329,9 +341,16 @@ class MainWindow(QMainWindow):
         self.recording = False
         self.record_btn.set_state("idle")
         self.status.showMessage("Optagelse stoppet")
-        log.info("Optagelse stoppet: %.1f sek, peak stemme=%s melodi=%s",
-                 self.pending.duration, self.pending.mic_peak,
-                 self.pending.loop_peak)
+        p = self.pending
+        log.info("Optagelse stoppet: %.1f sek, peak stemme=%s melodi=%s, "
+                 "offset=%s ms, overflows=%d, sporlængder=%s/%s sek",
+                 p.duration, p.mic_peak, p.loop_peak,
+                 None if p.offset_ms is None else round(p.offset_ms, 1),
+                 p.overflows, p.mic_seconds, p.loop_seconds)
+        if p.mic_seconds and p.loop_seconds \
+                and abs(p.mic_seconds - p.loop_seconds) > 0.04:
+            log.warning("Sporlængder afviger %.0f ms — muligt clock-drift",
+                        abs(p.mic_seconds - p.loop_seconds) * 1000)
         self._resolve_pending()
 
     def _resolve_pending(self):

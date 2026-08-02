@@ -49,7 +49,7 @@ class _PreviewWorker(QThread):
         try:
             path = os.path.join(temp_recording_dir(), "preview.mp3")
             mixdown(self._result.mic_path, self._result.loop_path, path,
-                    self._balance, self._normalize)
+                    self._balance, self._normalize, self._result.offset_ms)
             self.done.emit(path)
         except MixdownError as exc:
             self.failed.emit(str(exc))
@@ -148,6 +148,11 @@ class SaveDialog(QDialog):
                 and peak < SILENCE_PEAK:
             warnings.append(
                 "Melodien var næsten stille — spillede musikken på PC'en?"
+            )
+        if self._result.overflows > 0:
+            warnings.append(
+                "Der kan være små hak i optagelsen — PC'en var overbelastet "
+                "undervejs. Lyt den igennem, før du gemmer."
             )
         if warnings:
             log.warning("Stilheds-advarsel ved gem: %s", "; ".join(warnings))

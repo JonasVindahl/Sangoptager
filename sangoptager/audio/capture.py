@@ -11,11 +11,13 @@ ingen realtidsmixing eller clock-drift-håndtering her.
 
 from __future__ import annotations
 
+import collections
 import math
 import os
 import struct
 import sys
 import threading
+import time
 import wave
 
 IS_WINDOWS = sys.platform == "win32"
@@ -41,46 +43,131 @@ def _rms_level(pcm16: bytes) -> float:
 
 
 class _WavWriter:
-    """Trådsikker WAV-skriver med tilhørende udjævnet niveaumåler."""
+    """WAV-skriver med writer-tråd: audio-callbacken lægger kun bytes i en kø,
+    så et disk-hik aldrig kan blokere lyd-tråden (og dermed tabe samples).
+    Måler desuden niveau, første-buffer-tidsstempel og overflow."""
 
     def __init__(self, path: str, channels: int, rate: int):
         self._wf = wave.open(path, "wb")
         self._wf.setnchannels(channels)
         self._wf.setsampwidth(2)  # 16-bit
         self._wf.setframerate(rate)
-        self._lock = threading.Lock()
-        self._closed = False
+        self._channels = channels
+        self._rate = rate
+        self._queue: collections.deque[bytes] = collections.deque()
+        self._wakeup = threading.Event()
+        self._closing = False
+        self._closed = threading.Event()
         self.level = 0.0
-        self.max_level = 0.0  # højeste RMS i hele optagelsen (til stilheds-tjek)
+        self.max_level = 0.0    # højeste RMS i hele optagelsen (stilheds-tjek)
+        self.bytes_written = 0
+        self.overflows = 0      # antal buffere hvor driveren meldte overflow
+        self.first_ts: float | None = None  # tid for første buffer
+        self.ts_is_adc = False              # True = PortAudio ADC-klokke
+        threading.Thread(target=self._drain, daemon=True,
+                         name="wav-writer").start()
+
+    def mark_first_buffer(self, adc_time: float | None):
+        """Kaldes fra callbacken ved første buffer. adc_time=0/None → monotonic."""
+        if self.first_ts is not None:
+            return
+        if adc_time and adc_time > 0:
+            self.first_ts = adc_time
+            self.ts_is_adc = True
+        else:
+            self.first_ts = time.monotonic()
 
     def write(self, data: bytes):
-        with self._lock:
-            if not self._closed:
-                self._wf.writeframes(data)
+        """Fra audio-callbacken: kø + niveauer, ingen disk-I/O."""
+        self._queue.append(data)
+        self._wakeup.set()
         raw = _rms_level(data)
         self.level = max(raw, self.level * _METER_DECAY)
         self.max_level = max(raw, self.max_level)
 
-    def close(self):
-        with self._lock:
-            if not self._closed:
-                self._closed = True
+    def _drain(self):
+        while True:
+            self._wakeup.wait(0.2)
+            self._wakeup.clear()
+            while self._queue:
+                chunk = self._queue.popleft()
+                self._wf.writeframes(chunk)
+                self.bytes_written += len(chunk)
+            if self._closing and not self._queue:
                 self._wf.close()
+                self._closed.set()
+                return
+
+    @property
+    def seconds_written(self) -> float:
+        return self.bytes_written / (2 * self._channels * self._rate)
+
+    def close(self):
+        if self._closing:
+            return
+        self._closing = True
+        self._wakeup.set()
+        self._closed.wait(timeout=15)
+
+
+def compute_offset_ms(mic_ts: float | None, loop_ts: float | None,
+                      same_clock: bool = True) -> float | None:
+    """Startforskydning i ms (positiv = mic-streamen startede senere).
+
+    None hvis et tidsstempel mangler, eller de to stammer fra forskellige
+    klokker (ADC vs. monotonic) og derfor ikke kan sammenlignes.
+    """
+    if mic_ts is None or loop_ts is None or not same_clock:
+        return None
+    return (mic_ts - loop_ts) * 1000.0
 
 
 class RecordingResult:
     def __init__(self, mic_path: str | None, loop_path: str | None, duration: float,
-                 mic_peak: float | None = None, loop_peak: float | None = None):
+                 mic_peak: float | None = None, loop_peak: float | None = None,
+                 offset_ms: float | None = None, overflows: int = 0,
+                 mic_seconds: float | None = None,
+                 loop_seconds: float | None = None):
         self.mic_path = mic_path
         self.loop_path = loop_path
         self.duration = duration
         # Højeste RMS pr. spor; None = ukendt (fx gendannet efter crash)
         self.mic_peak = mic_peak
         self.loop_peak = loop_peak
+        # Målt startforskydning mellem sporene; None = ukendt → ingen kompensation
+        self.offset_ms = offset_ms
+        self.overflows = overflows
+        self.mic_seconds = mic_seconds
+        self.loop_seconds = loop_seconds
 
 
 class CaptureError(RuntimeError):
     """Fejl der skal vises for brugeren (manglende enhed osv.)."""
+
+
+def _collect_stats(mic_writer: _WavWriter | None, loop_writer: _WavWriter | None,
+                   mic_path: str | None, loop_path: str | None) -> dict:
+    """Samler stop()-statistik fra writerne til RecordingResult-felter."""
+    offset_ms = None
+    overflows = 0
+    mic_peak = loop_peak = mic_seconds = loop_seconds = None
+    if mic_writer is not None:
+        mic_peak = mic_writer.max_level
+        mic_seconds = mic_writer.seconds_written
+        overflows += mic_writer.overflows
+    if loop_writer is not None:
+        loop_peak = loop_writer.max_level
+        loop_seconds = loop_writer.seconds_written
+        overflows += loop_writer.overflows
+    if mic_writer is not None and loop_writer is not None:
+        offset_ms = compute_offset_ms(
+            mic_writer.first_ts, loop_writer.first_ts,
+            same_clock=mic_writer.ts_is_adc == loop_writer.ts_is_adc,
+        )
+    return dict(mic_path=mic_path, loop_path=loop_path,
+                mic_peak=mic_peak, loop_peak=loop_peak,
+                offset_ms=offset_ms, overflows=overflows,
+                mic_seconds=mic_seconds, loop_seconds=loop_seconds)
 
 
 class DualRecorder:
@@ -138,9 +225,8 @@ class DualRecorder:
         if self._start_time is not None:
             self._duration = time.monotonic() - self._start_time
             self._start_time = None
-        mic_path, loop_path, mic_peak, loop_peak = self._backend.stop()
-        return RecordingResult(mic_path, loop_path, self._duration,
-                               mic_peak, loop_peak)
+        stats = self._backend.stop()
+        return RecordingResult(duration=self._duration, **stats)
 
     def close(self):
         self._backend.close()
@@ -239,6 +325,10 @@ class _WindowsBackend:
         pyaudio = self._pa_module
 
         def callback(in_data, frame_count, time_info, status):
+            writer.mark_first_buffer(
+                (time_info or {}).get("input_buffer_adc_time"))
+            if status:  # driveren tabte/overskrev data i denne buffer
+                writer.overflows += 1
             writer.write(in_data)
             return (None, pyaudio.paContinue)
 
@@ -285,15 +375,14 @@ class _WindowsBackend:
 
         for writer in self._writers:
             writer.close()
-        mic_path, loop_path = self._mic_path, self._loop_path
-        mic_peak = self._mic_writer.max_level if self._mic_writer else None
-        loop_peak = self._loop_writer.max_level if self._loop_writer else None
+        stats = _collect_stats(self._mic_writer, self._loop_writer,
+                               self._mic_path, self._loop_path)
         self._writers.clear()
         self._mic_writer = None
         self._loop_writer = None
         self._mic_path = None
         self._loop_path = None
-        return mic_path, loop_path, mic_peak, loop_peak
+        return stats
 
     def close(self):
         self.stop()
@@ -360,9 +449,13 @@ class _DevBackend:
         channels = min(2, max(1, int(dev["max_input_channels"])))
         self._mic_path = os.path.join(out_dir, MIC_FILENAME)
         self._mic_writer = _WavWriter(self._mic_path, channels, rate)
+        writer = self._mic_writer
 
         def callback(indata, frames, time_info, status):
-            self._mic_writer.write(bytes(indata))
+            writer.mark_first_buffer(getattr(time_info, "inputBufferAdcTime", None))
+            if status and status.input_overflow:
+                writer.overflows += 1
+            writer.write(bytes(indata))
 
         self._stream = sd.RawInputStream(
             device=index,
@@ -379,14 +472,12 @@ class _DevBackend:
             self._stream.stop()
             self._stream.close()
             self._stream = None
-        mic_peak = None
         if self._mic_writer is not None:
-            mic_peak = self._mic_writer.max_level
             self._mic_writer.close()
-            self._mic_writer = None
-        path = self._mic_path
+        stats = _collect_stats(self._mic_writer, None, self._mic_path, None)
+        self._mic_writer = None
         self._mic_path = None
-        return path, None, mic_peak, None
+        return stats
 
     def close(self):
         self.stop()

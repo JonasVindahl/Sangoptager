@@ -24,6 +24,15 @@ de rå spor stadig klar, og appen tilbyder at gemme dem næste gang den åbnes.
 Mellemrumstasten starter/stopper også optagelsen. Fejlsøgning:
 `%APPDATA%\Sangoptager\app.log`.
 
+**Synkronisering:** De to spor tidsstemples ved optagestart, og den målte
+startforskydning (typisk 20–100 ms) kompenseres automatisk i mixet — kun
+inden for 5–500 ms og kun når målingen er troværdig (samme klokke-kilde),
+så en fejlmåling aldrig kan gøre det værre. Disk-skrivning sker i en
+separat tråd, og tabte buffere (overbelastet PC) udløser en advarsel i
+gem-dialogen. De rå spor arkiveres desuden i
+`%APPDATA%\Sangoptager\raa_spor\` (seneste 10 optagelser / 14 dage), så en
+skæv optagelse kan re-mixes i stedet for at skulle synges om.
+
 **Selv-opdatering:** Appen tjekker GitHub Releases ved opstart. Er der en ny
 version, vises et banner med "Opdatér nu" — appen downloader, udskifter sig
 selv og genstarter. Kræver kun at appen ligger i en mappe, brugeren kan

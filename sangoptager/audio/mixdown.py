@@ -60,6 +60,38 @@ def balance_gains(balance: float) -> tuple[float, float]:
 # EBU R128: -16 LUFS passer godt til musik på almindelige afspillere
 _LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"
 
+# Kompensér kun for målte startforskydninger i dette interval — mindre er
+# uhørligt, større er mere sandsynligt en målefejl end en ægte forskydning.
+OFFSET_MIN_MS = 5.0
+OFFSET_MAX_MS = 500.0
+
+
+def build_filter(mic_gain: float, loop_gain: float, normalize: bool,
+                 offset_ms: float | None = None,
+                 two_inputs: bool = True) -> str:
+    """ffmpeg-filterkæden. offset_ms > 0 betyder at mic-streamen startede
+    senere: dens indhold ligger for tidligt relativt til melodien og skal
+    derfor forsinkes — og omvendt ved negativt offset."""
+    finisher = _LOUDNORM if normalize else "alimiter=limit=0.97"
+    if not two_inputs:
+        return finisher
+
+    mic_chain = f"volume={mic_gain:.4f}"
+    mel_chain = f"volume={loop_gain:.4f}"
+    if offset_ms is not None and OFFSET_MIN_MS <= abs(offset_ms) <= OFFSET_MAX_MS:
+        delay = f"adelay={round(abs(offset_ms))}:all=1"
+        if offset_ms > 0:
+            mic_chain += "," + delay
+        else:
+            mel_chain += "," + delay
+
+    return (
+        f"[0:a]{mic_chain}[voc];"
+        f"[1:a]{mel_chain}[mel];"
+        "[voc][mel]amix=inputs=2:duration=longest:normalize=0,"
+        + finisher
+    )
+
 
 def mixdown(
     mic_wav: str | None,
@@ -67,12 +99,14 @@ def mixdown(
     out_mp3: str,
     balance: float = 0.5,
     normalize: bool = True,
+    offset_ms: float | None = None,
 ) -> str:
     """Mix (eller konvertér et enkelt spor) til MP3. Returnerer stien.
 
     normalize=True kører EBU R128 loudness-normalisering, så alle sange
-    ender med samme oplevede lydstyrke. WAV-filerne røres ikke — kald selv
-    cleanup bagefter, når MP3'en er verificeret.
+    ender med samme oplevede lydstyrke. offset_ms (fra RecordingResult)
+    kompenserer den målte startforskydning mellem sporene. WAV-filerne
+    røres ikke — kald selv cleanup bagefter, når MP3'en er verificeret.
     """
     inputs = [p for p in (mic_wav, loop_wav) if p and os.path.isfile(p)]
     if not inputs:
@@ -80,21 +114,13 @@ def mixdown(
 
     ffmpeg = find_ffmpeg()
     mic_gain, loop_gain = balance_gains(balance)
-    finisher = _LOUDNORM if normalize else "alimiter=limit=0.97"
 
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
     for path in inputs:
         cmd += ["-i", path]
 
-    if len(inputs) == 2:
-        filt = (
-            f"[0:a]volume={mic_gain:.4f}[voc];"
-            f"[1:a]volume={loop_gain:.4f}[mel];"
-            "[voc][mel]amix=inputs=2:duration=longest:normalize=0,"
-            + finisher
-        )
-    else:
-        filt = finisher
+    filt = build_filter(mic_gain, loop_gain, normalize, offset_ms,
+                        two_inputs=len(inputs) == 2)
 
     cmd += [
         "-filter_complex", filt,
