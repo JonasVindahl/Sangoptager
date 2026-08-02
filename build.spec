@@ -15,13 +15,15 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=["pyaudiowpatch"],
-    # numpy bruges kun af testene; Qt-moduler appen ikke rører fylder blot
-    # download ved hver selv-opdatering
+    # numpy bruges kun af testene; disse Qt-moduler rører appen ikke, og de
+    # fylder blot i downloaden ved hver selv-opdatering. QtQml/QtQuick står
+    # bevidst IKKE her — QtMultimedia (▶ Lyt) kan trække dem ind indirekte,
+    # og en sparet MB er ikke værd at risikere prøvelyt-funktionen for.
     excludes=[
         "tkinter", "numpy", "pytest",
         "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
         "PySide6.Qt3DCore", "PySide6.QtCharts", "PySide6.QtDataVisualization",
-        "PySide6.QtQuick", "PySide6.QtQml", "PySide6.QtDesigner",
+        "PySide6.QtDesigner",
     ],
 )
 pyz = PYZ(a.pure)
