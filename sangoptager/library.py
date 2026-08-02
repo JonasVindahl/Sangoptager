@@ -104,6 +104,30 @@ def album_folder(root: str, when: datetime.datetime | None = None) -> str:
     return os.path.join(root, when.strftime("%Y-%m"))
 
 
+def collect_titles(root: str) -> list[str]:
+    """Alle unikke sangtitler i biblioteket, sorteret — til autocomplete."""
+    titles: set[str] = set()
+    try:
+        month_dirs = os.listdir(root)
+    except OSError:
+        return []
+    for month in month_dirs:
+        month_path = os.path.join(root, month)
+        if not os.path.isdir(month_path):
+            continue
+        try:
+            filenames = os.listdir(month_path)
+        except OSError:
+            continue
+        for filename in filenames:
+            if not filename.endswith(".mp3"):
+                continue
+            result = parse_filename(filename)
+            if result is not None:
+                titles.add(result[0])
+    return sorted(titles, key=str.casefold)
+
+
 def retag_folder(folder_path: str, album_name: str, artist: str = "Far") -> int:
     """Omdøb + sæt alle tags + genberegn TRCK for hele mappen. Nyeste = track 1."""
     songs = []

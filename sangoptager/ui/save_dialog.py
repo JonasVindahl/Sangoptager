@@ -7,6 +7,7 @@ import os
 
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtWidgets import (
+    QCompleter,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -59,7 +60,7 @@ class SaveDialog(QDialog):
     """Returnerer via .result_action: ('save', titel, balance) eller ('delete',)."""
 
     def __init__(self, result: RecordingResult, balance: float, normalize: bool,
-                 parent=None):
+                 titles: list[str] | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Gem optagelse")
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
@@ -96,6 +97,11 @@ class SaveDialog(QDialog):
         font = self._title_edit.font()
         font.setPointSize(font.pointSize() + 4)
         self._title_edit.setFont(font)
+        if titles:
+            completer = QCompleter(titles, self._title_edit)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchContains)
+            self._title_edit.setCompleter(completer)
         layout.addWidget(self._title_edit)
 
         self._balance = BalanceSlider(balance)

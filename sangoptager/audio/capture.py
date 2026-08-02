@@ -203,6 +203,12 @@ class DualRecorder:
     def has_loopback(self) -> bool:
         return self._backend.has_loopback
 
+    @property
+    def mic_bytes(self) -> int:
+        """Bytes modtaget fra mikrofonen indtil nu — til vagthund i UI'et."""
+        writer = getattr(self._backend, "_mic_writer", None)
+        return writer.bytes_written if writer is not None else 0
+
     def device_summary(self) -> str:
         return self._backend.device_summary()
 

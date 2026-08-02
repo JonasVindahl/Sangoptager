@@ -29,7 +29,7 @@ from ..audio.capture import (
     RecordingResult,
 )
 from ..audio.mixdown import MixdownError, mixdown
-from ..library import album_folder, build_filename, retag_folder
+from ..library import album_folder, build_filename, collect_titles, retag_folder
 from ..logsetup import log
 from ..rawarchive import archive_recording
 from ..settings import Settings, temp_recording_dir
@@ -286,6 +286,9 @@ class MainWindow(QMainWindow):
 
     # ── Live-opdatering ────────────────────────────────────────────────────
 
+    # Sekunder uden mic-data før vagthunden slår alarm
+    _MIC_STALL_S = 2.0
+
     def _update_live(self):
         if self.recording and self.recorder:
             self._elapsed += self._poll.interval() / 1000.0
@@ -293,10 +296,32 @@ class MainWindow(QMainWindow):
             self.timer_label.setText(f"{mins:02d}:{secs:02d}")
             self.mic_meter.set_level(self.recorder.mic_level)
             self.loop_meter.set_level(self.recorder.loop_level)
+            self._watch_mic()
         elif not self.recording:
             self.mic_meter.reset()
             if self.recorder is None or self.recorder.has_loopback:
                 self.loop_meter.reset()
+
+    def _watch_mic(self):
+        """Alarm hvis mikrofonen holder op med at levere data midt i optagelsen
+        (USB hevet ud, Bluetooth død). Kun mic — loopback er legitimt stille,
+        når PC'en ikke afspiller noget."""
+        bytes_now = self.recorder.mic_bytes
+        if bytes_now != self._mic_watch_bytes:
+            self._mic_watch_bytes = bytes_now
+            self._mic_watch_stall = 0.0
+            if self._mic_stalled:
+                self._mic_stalled = False
+                self.status.showMessage("Optager…")
+                log.info("Mikrofonen leverer data igen")
+            return
+        self._mic_watch_stall += self._poll.interval() / 1000.0
+        if self._mic_watch_stall >= self._MIC_STALL_S and not self._mic_stalled:
+            self._mic_stalled = True
+            self.status.showMessage(
+                "⚠ MIKROFONEN SENDER INGEN LYD — tjek forbindelsen!")
+            log.warning("Mikrofonen er holdt op med at levere data under "
+                        "optagelse (%.0f s uden buffere)", self._mic_watch_stall)
 
     def _balance_changed(self):
         self.settings.balance = self.balance.value
@@ -332,6 +357,9 @@ class MainWindow(QMainWindow):
             return
         self.recording = True
         self._elapsed = 0.0
+        self._mic_watch_bytes = -1
+        self._mic_watch_stall = 0.0
+        self._mic_stalled = False
         self.record_btn.set_state("recording")
         self.status.showMessage("Optager…")
         log.info("Optagelse startet (%s)", self.recorder.device_summary())
@@ -360,6 +388,7 @@ class MainWindow(QMainWindow):
             result=self.pending,
             balance=self.settings.balance,
             normalize=self.settings.normalize,
+            titles=collect_titles(self.settings.output_dir),
             parent=self,
         )
         dialog.exec()

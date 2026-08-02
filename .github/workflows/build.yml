@@ -34,6 +34,9 @@ jobs:
       - name: Kør tests
         run: pytest tests/ -q
 
+      - name: Generér exe-ikon
+        run: python scripts/make_icon.py resources/app.ico
+
       - name: Byg med PyInstaller
         run: pyinstaller build.spec
 

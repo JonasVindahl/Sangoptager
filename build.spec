@@ -19,12 +19,15 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+icon_path = os.path.join("resources", "app.ico")
+
 exe = EXE(
     pyz,
     a.scripts,
     exclude_binaries=True,
     name="Sangoptager",
     console=False,   # ingen sort konsolvindue
+    icon=icon_path if os.path.isfile(icon_path) else None,
 )
 
 coll = COLLECT(

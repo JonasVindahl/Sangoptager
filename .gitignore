@@ -7,3 +7,4 @@ dist/
 .pytest_cache/
 resources/ffmpeg.exe
 resources/ffmpeg
+resources/app.ico

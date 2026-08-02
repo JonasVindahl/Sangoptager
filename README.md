@@ -21,8 +21,11 @@ optagelsen (glemt mikrofon, musikken spillede ikke), advarer dialogen, før
 der gemmes. Alle sange loudness-normaliseres (EBU R128, kan slås fra i ⚙),
 så afspilningslisten ikke hopper i lydstyrke. Crasher noget undervejs, ligger
 de rå spor stadig klar, og appen tilbyder at gemme dem næste gang den åbnes.
-Mellemrumstasten starter/stopper også optagelsen. Fejlsøgning:
-`%APPDATA%\Sangoptager\app.log`.
+Mellemrumstasten starter/stopper også optagelsen. Titel-feltet foreslår
+eksisterende sangtitler fra biblioteket, mens der skrives. Forsvinder
+mikrofonen midt i en optagelse (USB/Bluetooth), advarer statuslinjen efter
+2 sekunder. Appen kan kun køre i én instans — endnu et dobbeltklik fronter
+bare det åbne vindue. Fejlsøgning: `%APPDATA%\Sangoptager\app.log`.
 
 **Synkronisering:** De to spor tidsstemples ved optagestart, og den målte
 startforskydning (typisk 20–100 ms) kompenseres automatisk i mixet — kun

@@ -80,3 +80,34 @@ def test_sanitize_removes_unsafe_and_separator_chars():
 def test_album_folder():
     when = datetime.datetime(2026, 7, 30, 12, 0, 0)
     assert album_folder("/rod", when) == os.path.join("/rod", "2026-07")
+
+
+def test_collect_titles(tmp_path):
+    from sangoptager.library import collect_titles, invert_datetime
+
+    for month, files in {
+        "2026-06": [
+            f"{invert_datetime('2026-06-01_10-00-00')}_Den danske sang.mp3",
+            "22-03-2024_14-55-17_Gamle Ole.mp3",       # nyt format
+            "ikke-en-sangfil.mp3",                      # kan ikke parses
+            "noter.txt",                                # ikke mp3
+        ],
+        "2026-07": [
+            # Dublet på tværs af måneder — må kun optræde én gang
+            f"{invert_datetime('2026-07-15_09-30-00')}_Den danske sang.mp3",
+            f"{invert_datetime('2026-07-20_11-00-00')}_askepot.mp3",
+        ],
+    }.items():
+        folder = tmp_path / month
+        folder.mkdir()
+        for name in files:
+            (folder / name).touch()
+
+    titles = collect_titles(str(tmp_path))
+    assert titles == ["askepot", "Den danske sang", "Gamle Ole"]
+
+
+def test_collect_titles_missing_root():
+    from sangoptager.library import collect_titles
+
+    assert collect_titles("/findes/ikke/nogen/steder") == []
