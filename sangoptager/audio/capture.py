@@ -14,11 +14,12 @@ from __future__ import annotations
 import collections
 import math
 import os
-import struct
 import sys
 import threading
 import time
 import wave
+
+from ..logsetup import log
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -28,6 +29,13 @@ LOOP_FILENAME = "melodi.wav"
 _FRAMES_PER_BUFFER = 1024
 # Glidende udjævning af niveaumetrene, så de ikke flimrer
 _METER_DECAY = 0.6
+# Under denne peak-RMS regnes et helt spor for (nær-)stille — ca. -34 dB.
+# En glemt mikrofon eller en melodi der aldrig blev afspillet lander her.
+SILENCE_PEAK = 0.02
+# Under denne RMS regnes en enkelt buffer for stille i hale-stilheds-målingen
+# (ca. -40 dB — lavere end SILENCE_PEAK, så musikkens svage passager ikke
+# tæller med som "melodien er væk")
+TAIL_SILENCE_RMS = 0.01
 
 
 def _rms_level(pcm16: bytes) -> float:
@@ -35,10 +43,13 @@ def _rms_level(pcm16: bytes) -> float:
     n = len(pcm16) // 2
     if n == 0:
         return 0.0
-    samples = struct.unpack(f"<{n}h", pcm16[: n * 2])
-    acc = 0
-    for s in samples:
-        acc += s * s
+    samples = memoryview(pcm16)[: n * 2].cast("h")
+    if hasattr(math, "sumprod"):  # Python 3.12+: C-hastighed
+        acc = math.sumprod(samples, samples)
+    else:
+        acc = 0
+        for s in samples:
+            acc += s * s
     return math.sqrt(acc / n) / 32768.0
 
 
@@ -48,6 +59,7 @@ class _WavWriter:
     Måler desuden niveau, første-buffer-tidsstempel og overflow."""
 
     def __init__(self, path: str, channels: int, rate: int):
+        self._path = path
         self._wf = wave.open(path, "wb")
         self._wf.setnchannels(channels)
         self._wf.setsampwidth(2)  # 16-bit
@@ -62,6 +74,8 @@ class _WavWriter:
         self.max_level = 0.0    # højeste RMS i hele optagelsen (stilheds-tjek)
         self.bytes_written = 0
         self.overflows = 0      # antal buffere hvor driveren meldte overflow
+        self.write_failed = False           # disk-skrivning er brudt sammen
+        self._tail_silence_bytes = 0        # bytes siden sidste hørbare buffer
         self.first_ts: float | None = None  # tid for første buffer
         self.ts_is_adc = False              # True = PortAudio ADC-klokke
         threading.Thread(target=self._drain, daemon=True,
@@ -79,28 +93,50 @@ class _WavWriter:
 
     def write(self, data: bytes):
         """Fra audio-callbacken: kø + niveauer, ingen disk-I/O."""
-        self._queue.append(data)
-        self._wakeup.set()
+        if not self.write_failed:
+            self._queue.append(data)
+            self._wakeup.set()
         raw = _rms_level(data)
         self.level = max(raw, self.level * _METER_DECAY)
         self.max_level = max(raw, self.max_level)
+        if raw >= TAIL_SILENCE_RMS:
+            self._tail_silence_bytes = 0
+        else:
+            self._tail_silence_bytes += len(data)
 
     def _drain(self):
-        while True:
-            self._wakeup.wait(0.2)
-            self._wakeup.clear()
-            while self._queue:
-                chunk = self._queue.popleft()
-                self._wf.writeframes(chunk)
-                self.bytes_written += len(chunk)
-            if self._closing and not self._queue:
+        try:
+            while True:
+                self._wakeup.wait(0.2)
+                self._wakeup.clear()
+                while self._queue:
+                    chunk = self._queue.popleft()
+                    self._wf.writeframes(chunk)
+                    self.bytes_written += len(chunk)
+                if self._closing and not self._queue:
+                    self._wf.close()
+                    self._closed.set()
+                    return
+        except Exception as exc:
+            # Disk fuld/forsvundet: smid resten væk i stedet for at æde RAM,
+            # og lad UI'et melde diskfejlen via write_failed
+            self.write_failed = True
+            self._queue.clear()
+            log.error("Skrivefejl på %s: %s", self._path, exc)
+            try:
                 self._wf.close()
-                self._closed.set()
-                return
+            except Exception:
+                pass
+            self._closed.set()
 
     @property
     def seconds_written(self) -> float:
         return self.bytes_written / (2 * self._channels * self._rate)
+
+    @property
+    def tail_silence_seconds(self) -> float:
+        """Hvor længe har sporet været (nær-)stille op til nu?"""
+        return self._tail_silence_bytes / (2 * self._channels * self._rate)
 
     def close(self):
         if self._closing:
@@ -127,7 +163,9 @@ class RecordingResult:
                  mic_peak: float | None = None, loop_peak: float | None = None,
                  offset_ms: float | None = None, overflows: int = 0,
                  mic_seconds: float | None = None,
-                 loop_seconds: float | None = None):
+                 loop_seconds: float | None = None,
+                 disk_failed: bool = False,
+                 loop_tail_silence: float | None = None):
         self.mic_path = mic_path
         self.loop_path = loop_path
         self.duration = duration
@@ -139,6 +177,10 @@ class RecordingResult:
         self.overflows = overflows
         self.mic_seconds = mic_seconds
         self.loop_seconds = loop_seconds
+        # True hvis disk-skrivningen brød sammen undervejs (spor ufuldstændige)
+        self.disk_failed = disk_failed
+        # Sekunder melodisporet var stille op til stop; None = ukendt
+        self.loop_tail_silence = loop_tail_silence
 
 
 class CaptureError(RuntimeError):
@@ -150,15 +192,20 @@ def _collect_stats(mic_writer: _WavWriter | None, loop_writer: _WavWriter | None
     """Samler stop()-statistik fra writerne til RecordingResult-felter."""
     offset_ms = None
     overflows = 0
+    disk_failed = False
     mic_peak = loop_peak = mic_seconds = loop_seconds = None
+    loop_tail_silence = None
     if mic_writer is not None:
         mic_peak = mic_writer.max_level
         mic_seconds = mic_writer.seconds_written
         overflows += mic_writer.overflows
+        disk_failed = disk_failed or mic_writer.write_failed
     if loop_writer is not None:
         loop_peak = loop_writer.max_level
         loop_seconds = loop_writer.seconds_written
         overflows += loop_writer.overflows
+        disk_failed = disk_failed or loop_writer.write_failed
+        loop_tail_silence = loop_writer.tail_silence_seconds
     if mic_writer is not None and loop_writer is not None:
         offset_ms = compute_offset_ms(
             mic_writer.first_ts, loop_writer.first_ts,
@@ -167,7 +214,8 @@ def _collect_stats(mic_writer: _WavWriter | None, loop_writer: _WavWriter | None
     return dict(mic_path=mic_path, loop_path=loop_path,
                 mic_peak=mic_peak, loop_peak=loop_peak,
                 offset_ms=offset_ms, overflows=overflows,
-                mic_seconds=mic_seconds, loop_seconds=loop_seconds)
+                mic_seconds=mic_seconds, loop_seconds=loop_seconds,
+                disk_failed=disk_failed, loop_tail_silence=loop_tail_silence)
 
 
 class DualRecorder:
@@ -208,6 +256,15 @@ class DualRecorder:
         """Bytes modtaget fra mikrofonen indtil nu — til vagthund i UI'et."""
         writer = getattr(self._backend, "_mic_writer", None)
         return writer.bytes_written if writer is not None else 0
+
+    @property
+    def disk_failed(self) -> bool:
+        """True hvis disk-skrivningen er brudt sammen — til vagthund i UI'et."""
+        for name in ("_mic_writer", "_loop_writer"):
+            writer = getattr(self._backend, name, None)
+            if writer is not None and writer.write_failed:
+                return True
+        return False
 
     def device_summary(self) -> str:
         return self._backend.device_summary()
@@ -333,7 +390,7 @@ class _WindowsBackend:
         def callback(in_data, frame_count, time_info, status):
             writer.mark_first_buffer(
                 (time_info or {}).get("input_buffer_adc_time"))
-            if status:  # driveren tabte/overskrev data i denne buffer
+            if status & pyaudio.paInputOverflow:  # driveren tabte data
                 writer.overflows += 1
             writer.write(in_data)
             return (None, pyaudio.paContinue)

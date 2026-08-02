@@ -6,7 +6,6 @@ requires-python = ">=3.11"
 dependencies = [
     "PySide6>=6.7",
     "mutagen>=1.47",
-    "numpy>=1.26",
     "PyAudioWPatch>=0.2.12; sys_platform == 'win32'",
     "sounddevice>=0.4.6; sys_platform != 'win32'",
 ]
@@ -14,6 +13,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "numpy>=1.26",   # kun til testenes signalanalyse — bundles ikke i appen
 ]
 build = [
     "pyinstaller>=6.0",

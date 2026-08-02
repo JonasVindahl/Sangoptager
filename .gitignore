@@ -8,3 +8,4 @@ dist/
 resources/ffmpeg.exe
 resources/ffmpeg
 resources/app.ico
+.DS_Store

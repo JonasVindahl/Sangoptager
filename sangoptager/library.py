@@ -19,6 +19,8 @@ import re
 from mutagen.id3 import ID3, TALB, TDRC, TIT2, TPE1, TRCK
 from mutagen.mp3 import MP3
 
+from .logsetup import log
+
 DATE_PAT = re.compile(r"^(\d{2})-(\d{2})-(\d{4})$")   # DD-MM-YYYY
 TIME_PAT = re.compile(r"^(\d{2})-(\d{2})-(\d{2})$")   # HH-MM-SS
 INV_PAT  = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")   # inverteret (år > 2100)
@@ -26,6 +28,11 @@ INV_PAT  = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")   # inverteret (år > 2100)
 # Tegn der er ulovlige i Windows-filnavne, plus "_" som er feltseparator
 # i filnavnsformatet og derfor ikke må optræde i selve titlen.
 _UNSAFE_CHARS = re.compile(r'[\\/:*?"<>|_]+')
+
+
+def _is_sync_conflict(filename: str) -> bool:
+    """Syncthings konfliktkopier må ikke behandles som sange."""
+    return "sync-conflict" in filename.lower()
 
 
 def sanitize_title(title: str) -> str:
@@ -104,6 +111,17 @@ def album_folder(root: str, when: datetime.datetime | None = None) -> str:
     return os.path.join(root, when.strftime("%Y-%m"))
 
 
+def unique_path(path: str) -> str:
+    """Ledig variant af path: 'navn.mp3' → 'navn (2).mp3' hvis optaget."""
+    if not os.path.exists(path):
+        return path
+    root, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists(f"{root} ({n}){ext}"):
+        n += 1
+    return f"{root} ({n}){ext}"
+
+
 def collect_titles(root: str) -> list[str]:
     """Alle unikke sangtitler i biblioteket, sorteret — til autocomplete."""
     titles: set[str] = set()
@@ -120,7 +138,7 @@ def collect_titles(root: str) -> list[str]:
         except OSError:
             continue
         for filename in filenames:
-            if not filename.endswith(".mp3"):
+            if not filename.endswith(".mp3") or _is_sync_conflict(filename):
                 continue
             result = parse_filename(filename)
             if result is not None:
@@ -128,11 +146,27 @@ def collect_titles(root: str) -> list[str]:
     return sorted(titles, key=str.casefold)
 
 
+def _tags_current(audio: MP3, title: str, album: str, artist: str,
+                  date_only: str, track: str) -> bool:
+    """True hvis filens tags allerede er som ønsket — så skrivning (og dermed
+    Syncthing/Navidrome-churn) kan springes over."""
+    if audio.tags is None:
+        return False
+
+    def text(key: str) -> str | None:
+        frame = audio.tags.get(key)
+        return str(frame.text[0]) if frame is not None and frame.text else None
+
+    return (text("TIT2") == title and text("TALB") == album
+            and text("TPE1") == artist and text("TDRC") == date_only
+            and text("TRCK") == track)
+
+
 def retag_folder(folder_path: str, album_name: str, artist: str = "Far") -> int:
     """Omdøb + sæt alle tags + genberegn TRCK for hele mappen. Nyeste = track 1."""
     songs = []
     for filename in os.listdir(folder_path):
-        if not filename.endswith(".mp3"):
+        if not filename.endswith(".mp3") or _is_sync_conflict(filename):
             continue
         result = parse_filename(filename)
         if result is None:
@@ -154,21 +188,27 @@ def retag_folder(folder_path: str, album_name: str, artist: str = "Far") -> int:
             try:
                 os.rename(filepath, new_filepath)
                 filepath = new_filepath
-            except OSError:
+            except OSError as exc:
+                log.warning("Kunne ikke omdøbe %s: %s", filename, exc)
                 continue
 
         date_only = iso_dt[:10]
+        track = f"{track_num}/{total}"
         try:
             audio = MP3(filepath, ID3=ID3)
+            # Uændrede filer springes over, så Syncthing/Navidrome ikke skal
+            # re-synkronisere hele måneden ved hvert gem
+            if _tags_current(audio, title, album_name, artist, date_only, track):
+                continue
             if audio.tags is None:
                 audio.add_tags()
             audio.tags["TIT2"] = TIT2(encoding=3, text=title)
             audio.tags["TALB"] = TALB(encoding=3, text=album_name)
             audio.tags["TPE1"] = TPE1(encoding=3, text=artist)
             audio.tags["TDRC"] = TDRC(encoding=3, text=date_only)
-            audio.tags["TRCK"] = TRCK(encoding=3, text=f"{track_num}/{total}")
+            audio.tags["TRCK"] = TRCK(encoding=3, text=track)
             audio.save()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Kunne ikke tagge %s: %s", filepath, exc)
 
     return total

@@ -33,6 +33,8 @@ def main() -> int:
         window.raise_()
 
     instance_server = SingleInstanceServer(bring_to_front)  # noqa: F841
+    if instance_server.other_instance:
+        return 0  # en levende instans dukkede op i racet — luk stille
 
     window.show()
     window.activateWindow()

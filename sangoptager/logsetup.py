@@ -10,6 +10,7 @@ import logging
 import logging.handlers
 import os
 import sys
+import threading
 
 from .settings import _config_dir
 
@@ -30,9 +31,39 @@ def setup_logging() -> None:
     log.addHandler(handler)
     log.setLevel(logging.INFO)
 
-    # Uventede fejl skal i loggen i stedet for at forsvinde
+    # Uventede fejl skal i loggen i stedet for at forsvinde — også fra tråde
+    # og Qt: med console=False findes stderr ikke på fars PC
     def excepthook(exc_type, exc, tb):
         log.critical("Uventet fejl", exc_info=(exc_type, exc, tb))
         sys.__excepthook__(exc_type, exc, tb)
 
     sys.excepthook = excepthook
+
+    def thread_excepthook(args):
+        name = args.thread.name if args.thread else "?"
+        log.critical("Uventet fejl i tråden %s", name,
+                     exc_info=(args.exc_type, args.exc_value,
+                               args.exc_traceback))
+
+    threading.excepthook = thread_excepthook
+    _install_qt_handler()
+
+
+def _install_qt_handler() -> None:
+    try:
+        from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+    except ImportError:
+        return
+
+    levels = {
+        QtMsgType.QtWarningMsg: logging.WARNING,
+        QtMsgType.QtCriticalMsg: logging.ERROR,
+        QtMsgType.QtFatalMsg: logging.CRITICAL,
+    }
+
+    def qt_handler(msg_type, _context, message):
+        level = levels.get(msg_type)
+        if level is not None:
+            log.log(level, "Qt: %s", message)
+
+    qInstallMessageHandler(qt_handler)

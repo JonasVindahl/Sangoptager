@@ -15,7 +15,14 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=["pyaudiowpatch"],
-    excludes=["tkinter"],
+    # numpy bruges kun af testene; Qt-moduler appen ikke rører fylder blot
+    # download ved hver selv-opdatering
+    excludes=[
+        "tkinter", "numpy", "pytest",
+        "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
+        "PySide6.Qt3DCore", "PySide6.QtCharts", "PySide6.QtDataVisualization",
+        "PySide6.QtQuick", "PySide6.QtQml", "PySide6.QtDesigner",
+    ],
 )
 pyz = PYZ(a.pure)
 

@@ -24,8 +24,12 @@ de rå spor stadig klar, og appen tilbyder at gemme dem næste gang den åbnes.
 Mellemrumstasten starter/stopper også optagelsen. Titel-feltet foreslår
 eksisterende sangtitler fra biblioteket, mens der skrives. Forsvinder
 mikrofonen midt i en optagelse (USB/Bluetooth), advarer statuslinjen efter
-2 sekunder. Appen kan kun køre i én instans — endnu et dobbeltklik fronter
-bare det åbne vindue. Fejlsøgning: `%APPDATA%\Sangoptager\app.log`.
+2 sekunder; forsvinder **melodien** undervejs — typisk fordi lyden skiftede
+til en anden højttaler — nævner gem-dialogen det bagefter. Er der under
+500 MB fri diskplads, spørger appen inden optagelsen, og svigter disken
+midt i det hele, siger statuslinjen til med det samme. Appen kan kun køre i
+én instans — endnu et dobbeltklik fronter bare det åbne vindue.
+Fejlsøgning: `%APPDATA%\Sangoptager\app.log`.
 
 **Synkronisering:** De to spor tidsstemples ved optagestart, og den målte
 startforskydning (typisk 20–100 ms) kompenseres automatisk i mixet — kun
@@ -37,9 +41,17 @@ gem-dialogen. De rå spor arkiveres desuden i
 skæv optagelse kan re-mixes i stedet for at skulle synges om.
 
 **Selv-opdatering:** Appen tjekker GitHub Releases ved opstart. Er der en ny
-version, vises et banner med "Opdatér nu" — appen downloader, udskifter sig
-selv og genstarter. Kræver kun at appen ligger i en mappe, brugeren kan
-skrive i (fx `C:\Sangoptager`), ikke `C:\Program Files`.
+version, vises et banner med "Opdatér nu" — appen downloader, verificerer
+zippens SHA256 mod releasens `.sha256`-fil, udskifter sig selv og genstarter.
+
+Opdateringen rammer **den mappe appen faktisk kører fra** (`sys.executable`),
+ikke en hardkodet sti — så en genvej på skrivebordet peger på samme exe
+bagefter og bliver ved med at virke, uanset hvor mappen ligger. Kun appens
+egen `_internal\`-mappe spejles (`/MIR`); selve programmappen kopieres
+additivt, så filer man selv har lagt der ikke slettes. Kan mappen ikke skrives
+(fx `C:\Program Files`), siger banneret det i stedet for at hente forgæves.
+Går noget galt undervejs, startes den gamle version igen, og årsagen skrives
+til `%APPDATA%\Sangoptager\opdatering_fejl.log`.
 
 Indstillinger (⚙): valg af **mikrofon** og **melodikilde** (hvilken højttaler
 melodien afspilles på), sync-mappe og kunstnernavn. Gemmes i
@@ -53,7 +65,11 @@ dB-udlæsning, så man kan se at begge kilder har signal, før man synger løs.
   så nyeste optagelse sorterer først alfabetisk.
 - Mappe pr. måned = album: `2026-07\`
 - ID3-tags: titel, album=`ÅÅÅÅ-MM`, kunstner (standard "Far"), dato,
-  tracknummer hvor nyeste = 1. Hele månedsmappen re-tagges ved hvert gem.
+  tracknummer hvor **nyeste = 1**. Hele månedsmappen gennemgås ved hvert gem,
+  men kun filer med forkerte tags skrives — så Syncthing og Navidrome ikke
+  skal re-synkronisere hele måneden, hver gang der gemmes én sang.
+- Syncthings konfliktkopier (`…sync-conflict-….mp3`) ignoreres, så de hverken
+  får tracknumre eller dukker op som sange i biblioteket.
 
 ## Udvikling (macOS/Linux)
 

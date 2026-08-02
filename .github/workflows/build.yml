@@ -26,7 +26,17 @@ jobs:
       - name: Hent ffmpeg (bundles i appen)
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip -OutFile ffmpeg.zip
+          $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          # Udgiverens egen checksum verificeres, så en kompromitteret
+          # download ikke havner i appen
+          Invoke-WebRequest -Uri "$url.sha256" -OutFile ffmpeg.zip.sha256
+          $expected = (Get-Content ffmpeg.zip.sha256 -Raw).Trim().Split()[0].ToLower()
+          $actual = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) {
+            throw "ffmpeg-checksum passer ikke: forventet $expected, fik $actual"
+          }
+          Write-Host "ffmpeg-checksum OK: $actual"
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
           Copy-Item ffmpeg_tmp\*\bin\ffmpeg.exe resources\
           resources\ffmpeg.exe -version | Select-Object -First 1
@@ -53,13 +63,20 @@ jobs:
           path: dist/Sangoptager/
           if-no-files-found: error
 
-      - name: Zip til release
+      - name: Zip til release + checksum
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
-        run: Compress-Archive -Path dist\Sangoptager -DestinationPath Sangoptager-windows.zip
+        run: |
+          Compress-Archive -Path dist\Sangoptager -DestinationPath Sangoptager-windows.zip
+          # Appens selv-opdatering verificerer zippen mod denne fil
+          $hash = (Get-FileHash Sangoptager-windows.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  Sangoptager-windows.zip" | Out-File -Encoding ascii Sangoptager-windows.zip.sha256
+          Get-Content Sangoptager-windows.zip.sha256
 
       - name: Opret release (ved tags, fx v1.0.0)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: Sangoptager-windows.zip
+          files: |
+            Sangoptager-windows.zip
+            Sangoptager-windows.zip.sha256

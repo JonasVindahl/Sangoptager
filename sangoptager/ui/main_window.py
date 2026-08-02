@@ -6,10 +6,11 @@ import datetime
 import os
 import shutil
 import sys
+import time
 import wave
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -29,7 +30,13 @@ from ..audio.capture import (
     RecordingResult,
 )
 from ..audio.mixdown import MixdownError, mixdown
-from ..library import album_folder, build_filename, collect_titles, retag_folder
+from ..library import (
+    album_folder,
+    build_filename,
+    collect_titles,
+    retag_folder,
+    unique_path,
+)
 from ..logsetup import log
 from ..rawarchive import archive_recording
 from ..settings import Settings, temp_recording_dir
@@ -38,6 +45,8 @@ from ..update import (
     UpdateDownloadWorker,
     UpdateInfo,
     can_self_update,
+    install_dir,
+    install_dir_writable,
     launch_updater,
 )
 from .save_dialog import SaveDialog
@@ -71,7 +80,8 @@ class SaveWorker(QThread):
                     tmp_mp3, self._balance, self._settings.normalize,
                     self._result.offset_ms)
 
-            dest = os.path.join(dest_dir, build_filename(self._title, now))
+            dest = unique_path(
+                os.path.join(dest_dir, build_filename(self._title, now)))
             shutil.move(tmp_mp3, dest)
 
             total = retag_folder(dest_dir, album, self._settings.artist)
@@ -100,6 +110,23 @@ def _cleanup_temp():
     shutil.rmtree(temp_recording_dir(), ignore_errors=True)
 
 
+class TitlesWorker(QThread):
+    """Skanner biblioteket for eksisterende titler uden at fryse UI'et —
+    et bibliotek på et netværksdrev kan være længe om at svare."""
+
+    done = Signal(list)
+
+    def __init__(self, root: str, parent=None):
+        super().__init__(parent)
+        self._root = root
+
+    def run(self):
+        try:
+            self.done.emit(collect_titles(self._root))
+        except OSError as exc:
+            log.warning("Kunne ikke læse titler fra biblioteket: %s", exc)
+
+
 def _pending_recording() -> RecordingResult | None:
     """Ligger der en ikke-gemt optagelse fra en tidligere (crashet) kørsel?"""
     tmp = temp_recording_dir()
@@ -126,6 +153,11 @@ class MainWindow(QMainWindow):
         self.pending: RecordingResult | None = None
         self._worker: SaveWorker | None = None
         self._elapsed = 0.0
+        self._titles: list[str] = []
+        self._titles_worker: TitlesWorker | None = None
+        self._failed_result: RecordingResult | None = None
+        self._started_at = 0.0
+        self._disk_warned = False
 
         self._build_ui()
         if self.settings.window_geometry:
@@ -135,7 +167,9 @@ class MainWindow(QMainWindow):
                 )
             except ValueError:
                 pass
+            self._ensure_on_screen()
         self._init_recorder()
+        self._refresh_titles()
 
         self._poll = QTimer(self)
         self._poll.setInterval(80)
@@ -260,9 +294,35 @@ class MainWindow(QMainWindow):
         self._card_layout.setContentsMargins(*(round(14 * s),) * 4)
         self._card_layout.setSpacing(round(12 * s))
 
+    def _ensure_on_screen(self):
+        """Var vinduet sidst på en skærm der nu er koblet fra, ville det ligge
+        usynligt uden for skrivebordet — centrér det i stedet."""
+        frame = self.frameGeometry()
+        for screen in QGuiApplication.screens():
+            if screen.availableGeometry().intersects(frame):
+                return
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            frame.moveCenter(screen.availableGeometry().center())
+            self.move(frame.topLeft())
+            log.info("Gemt vinduesplacering var uden for skærmen — centreret")
+
+    def _refresh_titles(self):
+        """Opdatér autocomplete-listen i baggrunden (kaldes ved start og gem)."""
+        if self._titles_worker is not None and self._titles_worker.isRunning():
+            return
+        self._titles_worker = TitlesWorker(self.settings.output_dir, self)
+        self._titles_worker.done.connect(self._titles_ready)
+        self._titles_worker.finished.connect(self._titles_worker.deleteLater)
+        self._titles_worker.start()
+
+    def _titles_ready(self, titles: list):
+        self._titles = titles
+
     def _open_settings(self):
         mics = self.recorder.list_mics() if self.recorder else []
         loopbacks = self.recorder.list_loopbacks() if self.recorder else []
+        old_output = self.settings.output_dir
         dialog = SettingsDialog(self.settings, mics, loopbacks, self)
         dialog.exec()
         if dialog.devices_changed and not self.recording:
@@ -270,6 +330,8 @@ class MainWindow(QMainWindow):
                 self.recorder.close()
                 self.recorder = None
             self._init_recorder()
+        if self.settings.output_dir != old_output:
+            self._refresh_titles()
 
     def _init_recorder(self):
         try:
@@ -291,7 +353,9 @@ class MainWindow(QMainWindow):
 
     def _update_live(self):
         if self.recording and self.recorder:
-            self._elapsed += self._poll.interval() / 1000.0
+            # Ur-tid, ikke summerede poll-intervaller: et hakkende UI må ikke
+            # få timeren til at vise mindre end der faktisk er optaget
+            self._elapsed = time.monotonic() - self._started_at
             mins, secs = divmod(int(self._elapsed), 60)
             self.timer_label.setText(f"{mins:02d}:{secs:02d}")
             self.mic_meter.set_level(self.recorder.mic_level)
@@ -304,8 +368,15 @@ class MainWindow(QMainWindow):
 
     def _watch_mic(self):
         """Alarm hvis mikrofonen holder op med at levere data midt i optagelsen
-        (USB hevet ud, Bluetooth død). Kun mic — loopback er legitimt stille,
-        når PC'en ikke afspiller noget."""
+        (USB hevet ud, Bluetooth død), eller hvis disken svigter. Kun mic —
+        loopback er legitimt stille, når PC'en ikke afspiller noget."""
+        if self.recorder.disk_failed and not self._disk_warned:
+            self._disk_warned = True
+            self.status.showMessage(
+                "⚠ KAN IKKE GEMME TIL DISKEN — stop og tjek pladsen!")
+            log.error("Disk-skrivning svigtede under optagelse")
+            return
+
         bytes_now = self.recorder.mic_bytes
         if bytes_now != self._mic_watch_bytes:
             self._mic_watch_bytes = bytes_now
@@ -341,6 +412,29 @@ class MainWindow(QMainWindow):
         else:
             self._stop_recording()
 
+    # To rå spor i 48 kHz/16-bit stereo fylder ca. 0,4 MB/sek. tilsammen;
+    # 500 MB rækker til over 20 minutters sang
+    _MIN_FREE_MB = 500
+
+    def _check_disk_space(self) -> bool:
+        """Advar før optagelsen, hvis der næsten ikke er plads til de rå spor."""
+        try:
+            free_mb = shutil.disk_usage(
+                os.path.dirname(temp_recording_dir())).free // (1024 * 1024)
+        except OSError as exc:
+            log.warning("Kunne ikke tjekke diskplads: %s", exc)
+            return True
+        if free_mb >= self._MIN_FREE_MB:
+            return True
+        log.warning("Lav diskplads før optagelse: %d MB fri", free_mb)
+        answer = QMessageBox.warning(
+            self, "Lidt plads tilbage",
+            f"Der er kun {free_mb} MB fri plads på disken.\n"
+            "En lang optagelse kan løbe tør undervejs.\n\nOptag alligevel?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        return answer == QMessageBox.Yes
+
     def _start_recording(self):
         if self.recorder is None:
             self._init_recorder()
@@ -350,6 +444,8 @@ class MainWindow(QMainWindow):
                                      + self.device_label.text())
                 return
         _cleanup_temp()
+        if not self._check_disk_space():
+            return
         try:
             self.recorder.start(temp_recording_dir())
         except CaptureError as exc:
@@ -357,9 +453,11 @@ class MainWindow(QMainWindow):
             return
         self.recording = True
         self._elapsed = 0.0
+        self._started_at = time.monotonic()
         self._mic_watch_bytes = -1
         self._mic_watch_stall = 0.0
         self._mic_stalled = False
+        self._disk_warned = False
         self.record_btn.set_state("recording")
         self.status.showMessage("Optager…")
         log.info("Optagelse startet (%s)", self.recorder.device_summary())
@@ -388,7 +486,7 @@ class MainWindow(QMainWindow):
             result=self.pending,
             balance=self.settings.balance,
             normalize=self.settings.normalize,
-            titles=collect_titles(self.settings.output_dir),
+            titles=self._titles,
             parent=self,
         )
         dialog.exec()
@@ -416,6 +514,7 @@ class MainWindow(QMainWindow):
     def _save(self, result: RecordingResult, title: str, balance: float):
         self.status.showMessage(f"Gemmer '{title}'…")
         self.record_btn.set_state("busy")
+        self._failed_result = result  # bevares hvis gemmet fejler
         self._worker = SaveWorker(result, title, balance, self.settings, self)
         self._worker.done.connect(self._save_done)
         self._worker.failed.connect(self._save_failed)
@@ -424,11 +523,20 @@ class MainWindow(QMainWindow):
     def _save_done(self, message: str):
         self.record_btn.set_state("idle")
         self.status.showMessage(message)
+        self._refresh_titles()
 
     def _save_failed(self, message: str):
         self.status.showMessage("⚠ Kunne ikke gemme")
-        # De rå WAV-spor er bevaret, så intet er tabt — prøv igen
-        self.pending = _pending_recording()
+        # De rå WAV-spor er bevaret, så intet er tabt — prøv igen. Behold det
+        # oprindelige resultat, så offset-kompensation og advarsler ikke går
+        # tabt ved andet forsøg; kun hvis sporene er væk, læses de fra disk.
+        if self._failed_result is not None and \
+                self._failed_result.mic_path is not None and \
+                os.path.isfile(self._failed_result.mic_path):
+            self.pending = self._failed_result
+        else:
+            self.pending = _pending_recording()
+        self._failed_result = None
         self.record_btn.set_state("resolve" if self.pending else "idle")
         QMessageBox.critical(
             self, "Kunne ikke gemme",
@@ -444,8 +552,18 @@ class MainWindow(QMainWindow):
 
     def _update_found(self, info: UpdateInfo):
         self._update_info = info
-        self.update_label.setText(f"Ny version {info.tag} er klar")
-        self.update_btn.setEnabled(True)
+        if not install_dir_writable():
+            # Fx pakket ud i Program Files: sig det i stedet for at hente
+            # hele zippen og fejle bagefter
+            self.update_label.setText(
+                f"Ny version {info.tag} findes, men appen kan ikke opdatere "
+                f"sig selv her ({install_dir()}). Flyt mappen til fx "
+                "C:\\Sangoptager."
+            )
+            self.update_btn.hide()
+        else:
+            self.update_label.setText(f"Ny version {info.tag} er klar")
+            self.update_btn.setEnabled(True)
         self.update_banner.show()
 
     def _start_update(self):

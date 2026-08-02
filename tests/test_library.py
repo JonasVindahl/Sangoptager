@@ -1,5 +1,7 @@
 import datetime
 import os
+import shutil
+import subprocess
 
 import pytest
 
@@ -111,3 +113,112 @@ def test_collect_titles_missing_root():
     from sangoptager.library import collect_titles
 
     assert collect_titles("/findes/ikke/nogen/steder") == []
+
+
+def test_collect_titles_ignores_sync_conflicts(tmp_path):
+    """Syncthings konfliktkopier er ikke sange og må ikke i autocomplete."""
+    from sangoptager.library import collect_titles
+
+    folder = tmp_path / "2026-07"
+    folder.mkdir()
+    inv = invert_datetime("2026-07-15_09-30-00")
+    (folder / f"{inv}_Den danske sang.mp3").touch()
+    (folder / f"{inv}_Den danske sang.sync-conflict-20260715-093000-ABCDEFG.mp3").touch()
+
+    assert collect_titles(str(tmp_path)) == ["Den danske sang"]
+
+
+needs_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None, reason="ffmpeg ikke installeret"
+)
+
+
+def _make_mp3(path, seconds=1):
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+         "-codec:a", "libmp3lame", "-b:a", "64k", str(path)],
+        check=True,
+    )
+
+
+@needs_ffmpeg
+def test_retag_folder_newest_is_track_one(tmp_path):
+    """Kernekravet i biblioteket: nyeste optagelse skal altid være track 1,
+    så afspilleren viser de nye sange øverst."""
+    from mutagen.mp3 import MP3
+
+    from sangoptager.library import retag_folder
+
+    times = ["2026-07-01_10-00-00", "2026-07-20_18-30-00", "2026-07-10_12-00-00"]
+    for iso in times:
+        _make_mp3(tmp_path / f"{invert_datetime(iso)}_Sang {iso[8:10]}.mp3")
+
+    total = retag_folder(str(tmp_path), "2026-07", artist="Far")
+    assert total == 3
+
+    tracks = {}
+    for name in os.listdir(tmp_path):
+        audio = MP3(str(tmp_path / name))
+        title = str(audio.tags["TIT2"].text[0])
+        tracks[title] = str(audio.tags["TRCK"].text[0])
+        assert str(audio.tags["TALB"].text[0]) == "2026-07"
+        assert str(audio.tags["TPE1"].text[0]) == "Far"
+
+    assert tracks["Sang 20"] == "1/3"   # nyeste = 1
+    assert tracks["Sang 10"] == "2/3"
+    assert tracks["Sang 01"] == "3/3"   # ældste sidst
+
+
+@needs_ffmpeg
+def test_retag_folder_skips_unchanged_files(tmp_path):
+    """Andet gennemløb må ikke røre filer, hvis tags allerede er rigtige —
+    ellers re-synkroniserer Syncthing hele måneden ved hvert gem."""
+    from sangoptager.library import retag_folder
+
+    for iso in ["2026-07-01_10-00-00", "2026-07-20_18-30-00"]:
+        _make_mp3(tmp_path / f"{invert_datetime(iso)}_Sang {iso[8:10]}.mp3")
+
+    retag_folder(str(tmp_path), "2026-07", artist="Far")
+    before = {n: os.stat(tmp_path / n).st_mtime_ns for n in os.listdir(tmp_path)}
+
+    retag_folder(str(tmp_path), "2026-07", artist="Far")
+    after = {n: os.stat(tmp_path / n).st_mtime_ns for n in os.listdir(tmp_path)}
+    assert before == after
+
+    # …men et ændret kunstnernavn skal stadig slå igennem
+    retag_folder(str(tmp_path), "2026-07", artist="Bedstefar")
+    changed = {n: os.stat(tmp_path / n).st_mtime_ns for n in os.listdir(tmp_path)}
+    assert changed != after
+
+
+@needs_ffmpeg
+def test_retag_folder_ignores_sync_conflicts(tmp_path):
+    """En konfliktkopi må hverken tælle med i totalen eller få tracknummer."""
+    from mutagen.mp3 import MP3
+
+    from sangoptager.library import retag_folder
+
+    inv = invert_datetime("2026-07-20_18-30-00")
+    _make_mp3(tmp_path / f"{inv}_Rigtig sang.mp3")
+    conflict = tmp_path / f"{inv}_Rigtig sang.sync-conflict-20260720-183000-XYZ.mp3"
+    _make_mp3(conflict)
+
+    assert retag_folder(str(tmp_path), "2026-07", artist="Far") == 1
+    # Konfliktkopien beholder ffmpegs egne tags, men får ingen af vores
+    conflict_tags = MP3(str(conflict)).tags
+    assert conflict_tags is None or "TRCK" not in conflict_tags
+    assert conflict_tags is None or "TIT2" not in conflict_tags
+
+
+def test_unique_path_avoids_overwrite(tmp_path):
+    from sangoptager.library import unique_path
+
+    target = tmp_path / "sang.mp3"
+    assert unique_path(str(target)) == str(target)
+
+    target.touch()
+    assert unique_path(str(target)) == str(tmp_path / "sang (2).mp3")
+
+    (tmp_path / "sang (2).mp3").touch()
+    assert unique_path(str(target)) == str(tmp_path / "sang (3).mp3")

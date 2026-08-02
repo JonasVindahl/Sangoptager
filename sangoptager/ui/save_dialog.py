@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..audio.capture import RecordingResult
+from ..audio.capture import SILENCE_PEAK, RecordingResult
 from ..audio.mixdown import MixdownError, mixdown
 from ..library import sanitize_title
 from ..logsetup import log
@@ -31,8 +31,10 @@ try:
 except ImportError:  # QtMultimedia mangler — skjul blot prøvelyt-knappen
     HAS_AUDIO = False
 
-# Under denne peak-RMS regnes et spor for (nær-)stille — ca. -34 dB
-SILENCE_PEAK = 0.02
+# Så mange sekunders stilhed til sidst i melodisporet udløser en advarsel om,
+# at lyden kan være skiftet til en anden enhed midt i sangen. Rundhåndet, så
+# et normalt outro/fade aldrig giver falsk alarm.
+LOOP_TAIL_SILENCE_S = 20.0
 
 
 class _PreviewWorker(QThread):
@@ -143,6 +145,11 @@ class SaveDialog(QDialog):
 
     def _warnings(self) -> list[str]:
         warnings = []
+        if self._result.disk_failed:
+            warnings.append(
+                "Disken svigtede under optagelsen, så sangen kan være "
+                "afkortet. Lyt den igennem, før du gemmer."
+            )
         peak = self._result.mic_peak
         if peak is not None and peak < SILENCE_PEAK:
             warnings.append(
@@ -154,6 +161,17 @@ class SaveDialog(QDialog):
                 and peak < SILENCE_PEAK:
             warnings.append(
                 "Melodien var næsten stille — spillede musikken på PC'en?"
+            )
+        elif self._result.loop_path is not None \
+                and self._result.loop_tail_silence is not None \
+                and self._result.loop_tail_silence >= LOOP_TAIL_SILENCE_S \
+                and self._result.duration > LOOP_TAIL_SILENCE_S * 2:
+            # Melodien havde signal, men forsvandt undervejs — typisk fordi
+            # lyden skiftede til en anden enhed (Bluetooth-hovedtelefoner)
+            warnings.append(
+                f"Melodien forsvandt de sidste "
+                f"{int(self._result.loop_tail_silence)} sekunder — skiftede "
+                "lyden til en anden højttaler undervejs?"
             )
         if self._result.overflows > 0:
             warnings.append(

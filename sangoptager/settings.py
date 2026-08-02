@@ -55,9 +55,13 @@ class Settings:
         return settings
 
     def save(self) -> None:
+        # Atomisk: skriv til tempfil + omdøb, så et crash midt i skrivningen
+        # aldrig efterlader en halv config.json
         os.makedirs(_config_dir(), exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as fh:
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(asdict(self), fh, indent=2, ensure_ascii=False)
+        os.replace(tmp, self.path)
 
 
 def temp_recording_dir() -> str:
