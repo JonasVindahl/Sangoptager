@@ -94,6 +94,9 @@ jobs:
           $exists = if ($LASTEXITCODE -eq 0) { "true" } else { "false" }
           "exists=$exists" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
           Write-Host "Release findes i forvejen: $exists"
+          # gh returnerer 1 når releaset ikke findes — det er et gyldigt svar
+          # her, ikke en fejl, og må ikke vælte trinnet
+          exit 0
 
       - name: Zip til release + checksum
         if: steps.existing.outputs.exists == 'false'
