@@ -15,7 +15,7 @@ import wave
 import numpy as np
 import pytest
 
-from sangoptager.audio.capture import compute_offset_ms, compute_start_offset_ms
+from sangoptager.audio.capture import compute_start_offset_ms, length_diff_ms
 from sangoptager.audio.mixdown import build_filter, mixdown
 
 needs_ffmpeg = pytest.mark.skipif(
@@ -23,38 +23,28 @@ needs_ffmpeg = pytest.mark.skipif(
 )
 
 
-# ── compute_offset_ms (kun diagnostik) ───────────────────────────────────────
+# ── startforskydning: målt på første lyddata, samme ur ───────────────────────
 
-def test_offset_positive_when_mic_starts_later():
-    assert compute_offset_ms(10.080, 10.000) == pytest.approx(80.0)
-
-
-def test_offset_negative_when_loop_starts_later():
-    assert compute_offset_ms(10.000, 10.050) == pytest.approx(-50.0)
+def test_start_offset_positive_when_melody_began_later():
+    """WASAPI-loopback leverer først data når musikken spiller, så melodiens
+    første buffer kommer senere end mikrofonens."""
+    assert compute_start_offset_ms(100.000, 101.045) == pytest.approx(1045.0)
 
 
-def test_offset_none_on_missing_or_mixed_clocks():
-    assert compute_offset_ms(None, 10.0) is None
-    assert compute_offset_ms(10.0, None) is None
-    assert compute_offset_ms(10.08, 10.0, same_clock=False) is None
-
-
-# ── startforskydning ud fra sporlængder ──────────────────────────────────────
-
-def test_start_offset_positive_when_mic_recorded_longer():
-    """Mic 49.39 s / melodi 48.60 s (rigtige tal fra app.log) = melodien
-    startede 791 ms for sent."""
-    assert compute_start_offset_ms(49.388843537414964, 48.59733333333333) == \
-        pytest.approx(791.5, abs=0.5)
-
-
-def test_start_offset_negative_when_loop_recorded_longer():
-    assert compute_start_offset_ms(48.0, 48.25) == pytest.approx(-250.0)
+def test_start_offset_negative_when_mic_began_later():
+    assert compute_start_offset_ms(100.250, 100.000) == pytest.approx(-250.0)
 
 
 def test_start_offset_none_without_both_tracks():
     assert compute_start_offset_ms(None, 10.0) is None
     assert compute_start_offset_ms(10.0, None) is None
+
+
+def test_length_diff_is_diagnostic_only():
+    """Sporlængderne må ikke bruges som forskydning: stopper musikken før der
+    trykkes Stop, indeholder forskellen både start- og slutpausen."""
+    assert length_diff_ms(23.893, 22.848) == pytest.approx(1045.0, abs=1)
+    assert length_diff_ms(None, 1.0) is None
 
 
 # ── build_filter: kompensér KUN ud fra sporlængde-målingen ───────────────────
@@ -84,9 +74,9 @@ def test_filter_single_input_is_just_finisher():
     assert build_filter(1.0, 1.0, False, two_inputs=False) == "alimiter=limit=0.97"
 
 
-def test_adc_offset_can_never_reach_the_mix():
-    """ADC-tidsstemplerne har ikke fælles nulpunkt — de skævvred mixet i
-    v1.3.0-v1.6.0 og må aldrig kunne bruges som filter-parameter igen."""
+def test_only_the_measured_start_offset_reaches_the_mix():
+    """Kun start_offset_ms må kunne forskyde sporene. Et bart offset_ms —
+    ADC-tidsstemplerne fra v1.3.0-v1.6.0 — må aldrig komme igen."""
     import inspect
 
     for fn in (mixdown, build_filter):

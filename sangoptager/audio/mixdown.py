@@ -72,14 +72,16 @@ def build_filter(mic_gain: float, loop_gain: float, normalize: bool,
                  start_offset_ms: float | None = None) -> str:
     """ffmpeg-filterkæden: balance, startforskydning, sum og limiter/normalisering.
 
-    start_offset_ms kommer fra sporlængderne (se compute_start_offset_ms) og
-    er positiv, når mikrofonen begyndte at optage før melodikilden — så
-    mangler melodisporet sin begyndelse og skal forsinkes tilsvarende for at
-    ligge rigtigt. Negativ værdi betyder det omvendte.
+    start_offset_ms måles på, hvornår hvert spors første lyddata ankom (se
+    compute_start_offset_ms). Den er positiv, når melodisporet begyndte
+    senest — WASAPI-loopback optager nemlig først, når der faktisk spiller
+    lyd — og melodien skal da forsinkes tilsvarende for at ligge rigtigt.
+    Negativ værdi betyder det omvendte.
 
-    Bemærk: ADC-tidsstemplernes `offset_ms` må ALDRIG bruges her. De to
-    streams har ikke fælles nulpunkt, så den værdi er ikke en ægte
-    forskydning — det var netop den fejl, der skævvred mixet i v1.3.0–v1.6.0.
+    Bemærk: hverken PortAudios ADC-tidsstempler eller forskellen på
+    sporlængder må bruges her. De første har ikke fælles nulpunkt (det
+    skævvred mixet i v1.3.0–v1.6.0); den anden indeholder også pausen fra
+    musikken stopper til der trykkes Stop.
     """
     finisher = _LOUDNORM if normalize else "alimiter=limit=0.97"
     if not two_inputs:

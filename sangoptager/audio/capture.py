@@ -77,18 +77,18 @@ class _WavWriter:
         self.write_failed = False           # disk-skrivning er brudt sammen
         self._tail_silence_bytes = 0        # bytes siden sidste hørbare buffer
         self.first_ts: float | None = None  # tid for første buffer
-        self.ts_is_adc = False              # True = PortAudio ADC-klokke
         threading.Thread(target=self._drain, daemon=True,
                          name="wav-writer").start()
 
-    def mark_first_buffer(self, adc_time: float | None):
-        """Kaldes fra callbacken ved første buffer. adc_time=0/None → monotonic."""
-        if self.first_ts is not None:
-            return
-        if adc_time and adc_time > 0:
-            self.first_ts = adc_time
-            self.ts_is_adc = True
-        else:
+    def mark_first_buffer(self):
+        """Kaldes fra callbacken ved første buffer.
+
+        Der bruges ALTID time.monotonic(). PortAudios ADC-tidsstempler gælder
+        kun inden for én stream og kan ikke sammenlignes på tværs — det var
+        netop den fejl, der skævvred mixet i v1.3.0–v1.6.0. monotonic er
+        derimod procesbred, så de to spors tidsstempler er sammenlignelige.
+        """
+        if self.first_ts is None:
             self.first_ts = time.monotonic()
 
     def write(self, data: bytes):
@@ -146,54 +146,53 @@ class _WavWriter:
         self._closed.wait(timeout=15)
 
 
-def compute_start_offset_ms(mic_seconds: float | None,
-                            loop_seconds: float | None) -> float | None:
-    """Startforskydning i ms ud fra sporenes længde (positiv = mic startede først).
+def compute_start_offset_ms(mic_first_ts: float | None,
+                            loop_first_ts: float | None) -> float | None:
+    """Startforskydning i ms (positiv = melodisporet begyndte senest).
 
-    Begge streams stoppes samtidig (se _WindowsBackend.stop), så forskellen i
-    optaget længde ér forskellen i starttidspunkt. Målingen sker i hver streams
-    egne sample-tællinger og er derfor pålidelig — modsat ADC-tidsstemplerne i
-    compute_offset_ms, som ikke har fælles nulpunkt.
+    Måles på hvornår hvert spors FØRSTE lyddata ankom, aflæst med den
+    procesbrede time.monotonic() i begge callbacks — altså samme ur.
+
+    Det er nødvendigt, fordi WASAPI-loopback ikke leverer data, før der
+    faktisk afspilles lyd på enheden: melodisporets første sample er det
+    øjeblik musikken startede, ikke det øjeblik der blev trykket Optag.
+    Forskellen skal derfor lægges tilbage i mixet.
+
+    Sporlængder duer ikke til denne måling: stopper musikken før der trykkes
+    Stop, holder loopbacken også op med at levere data, og længdeforskellen
+    ville så indeholde både start- OG slutpausen.
     """
+    if mic_first_ts is None or loop_first_ts is None:
+        return None
+    return (loop_first_ts - mic_first_ts) * 1000.0
+
+
+def length_diff_ms(mic_seconds: float | None,
+                   loop_seconds: float | None) -> float | None:
+    """Forskel på sporlængder i ms — kun til logning og krydstjek."""
     if mic_seconds is None or loop_seconds is None:
         return None
     return (mic_seconds - loop_seconds) * 1000.0
 
 
-def compute_offset_ms(mic_ts: float | None, loop_ts: float | None,
-                      same_clock: bool = True) -> float | None:
-    """Forskel mellem sporenes første tidsstempler i ms — KUN til diagnostik.
-
-    Værdien må ikke bruges til at tidsforskyde sporene i mixet. Mikrofon og
-    loopback er to uafhængige PortAudio-streams, og PortAudios ADC-tidsstempler
-    gælder kun inden for én stream — de har ikke fælles nulpunkt. Differencen
-    er derfor ikke en ægte startforskydning, men den er nyttig i loggen, når
-    en optagelse skal fejlsøges.
-    """
-    if mic_ts is None or loop_ts is None or not same_clock:
-        return None
-    return (mic_ts - loop_ts) * 1000.0
-
-
 class RecordingResult:
     def __init__(self, mic_path: str | None, loop_path: str | None, duration: float,
                  mic_peak: float | None = None, loop_peak: float | None = None,
-                 offset_ms: float | None = None, overflows: int = 0,
+                 overflows: int = 0,
                  mic_seconds: float | None = None,
                  loop_seconds: float | None = None,
                  disk_failed: bool = False,
                  loop_tail_silence: float | None = None,
-                 start_offset_ms: float | None = None):
+                 start_offset_ms: float | None = None,
+                 length_diff_ms: float | None = None):
         self.mic_path = mic_path
         self.loop_path = loop_path
         self.duration = duration
         # Højeste RMS pr. spor; None = ukendt (fx gendannet efter crash)
         self.mic_peak = mic_peak
         self.loop_peak = loop_peak
-        # Diagnostisk tidsstempel-difference mellem sporene (se
-        # compute_offset_ms) — bruges kun i log og arkiv, aldrig i mixet
-        self.offset_ms = offset_ms
-        # Målt startforskydning ud fra sporlængder — DEN kompenseres i mixet
+        # Målt startforskydning (positiv = melodien begyndte senest) —
+        # DEN kompenseres i mixet
         self.start_offset_ms = start_offset_ms
         self.overflows = overflows
         self.mic_seconds = mic_seconds
@@ -202,6 +201,8 @@ class RecordingResult:
         self.disk_failed = disk_failed
         # Sekunder melodisporet var stille op til stop; None = ukendt
         self.loop_tail_silence = loop_tail_silence
+        # Forskel på sporlængder — kun til logning/krydstjek, ikke til mixet
+        self.length_diff_ms = length_diff_ms
 
 
 class CaptureError(RuntimeError):
@@ -211,7 +212,7 @@ class CaptureError(RuntimeError):
 def _collect_stats(mic_writer: _WavWriter | None, loop_writer: _WavWriter | None,
                    mic_path: str | None, loop_path: str | None) -> dict:
     """Samler stop()-statistik fra writerne til RecordingResult-felter."""
-    offset_ms = None
+    start_offset_ms = None
     overflows = 0
     disk_failed = False
     mic_peak = loop_peak = mic_seconds = loop_seconds = None
@@ -228,17 +229,15 @@ def _collect_stats(mic_writer: _WavWriter | None, loop_writer: _WavWriter | None
         disk_failed = disk_failed or loop_writer.write_failed
         loop_tail_silence = loop_writer.tail_silence_seconds
     if mic_writer is not None and loop_writer is not None:
-        offset_ms = compute_offset_ms(
-            mic_writer.first_ts, loop_writer.first_ts,
-            same_clock=mic_writer.ts_is_adc == loop_writer.ts_is_adc,
-        )
+        start_offset_ms = compute_start_offset_ms(
+            mic_writer.first_ts, loop_writer.first_ts)
     return dict(mic_path=mic_path, loop_path=loop_path,
                 mic_peak=mic_peak, loop_peak=loop_peak,
-                offset_ms=offset_ms, overflows=overflows,
+                overflows=overflows,
                 mic_seconds=mic_seconds, loop_seconds=loop_seconds,
                 disk_failed=disk_failed, loop_tail_silence=loop_tail_silence,
-                start_offset_ms=compute_start_offset_ms(mic_seconds,
-                                                        loop_seconds))
+                start_offset_ms=start_offset_ms,
+                length_diff_ms=length_diff_ms(mic_seconds, loop_seconds))
 
 
 class DualRecorder:
@@ -411,8 +410,7 @@ class _WindowsBackend:
         pyaudio = self._pa_module
 
         def callback(in_data, frame_count, time_info, status):
-            writer.mark_first_buffer(
-                (time_info or {}).get("input_buffer_adc_time"))
+            writer.mark_first_buffer()
             if status & pyaudio.paInputOverflow:  # driveren tabte data
                 writer.overflows += 1
             writer.write(in_data)
@@ -556,7 +554,7 @@ class _DevBackend:
         writer = self._mic_writer
 
         def callback(indata, frames, time_info, status):
-            writer.mark_first_buffer(getattr(time_info, "inputBufferAdcTime", None))
+            writer.mark_first_buffer()
             if status and status.input_overflow:
                 writer.overflows += 1
             writer.write(bytes(indata))

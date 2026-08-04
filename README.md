@@ -31,19 +31,21 @@ midt i det hele, siger statuslinjen til med det samme. Appen kan kun køre i
 én instans — endnu et dobbeltklik fronter bare det åbne vindue.
 Fejlsøgning: `%APPDATA%\Sangoptager\app.log`.
 
-**Synkronisering:** De to enheder gøres klar hver for sig og sættes derefter
-i gang samtidig, så begge spor begynder på samme tid. Tidligere startede
-mikrofonen allerede, mens loopback-enheden stadig blev initialiseret — målt
-til op mod 800 ms — så melodisporet manglede sin begyndelse, og musikken lå
-forud for stemmen i hele sangen.
+**Synkronisering:** WASAPI-loopback leverer først data, når der faktisk
+afspilles lyd på enheden. Melodisporets første sample er derfor det øjeblik,
+musikken begyndte — ikke det øjeblik der blev trykket Optag. Trykker man
+Optag og starter først sangen et sekund senere, mangler melodisporet det
+sekund, og musikken ville ligge et helt sekund forud for stemmen.
 
-Er der en rest tilbage, rettes den i mixet ud fra **sporlængderne**: begge
-streams stoppes samtidig, så forskellen i optaget længde ér forskellen i
-starttidspunkt, målt i sample-tællinger. Kompensation sker kun mellem 20 ms
-og 3 s; derudenfor logges det i stedet. Fra v1.3.0 til v1.6.0 blev der i
-stedet brugt PortAudios ADC-tidsstempler, men de to streams har ikke fælles
-nulpunkt, så den værdi var ikke en ægte forskydning — den måles stadig og
-logges som `adc-offset`, men bruges aldrig i mixet. Disk-skrivning sker i en
+Forskydningen måles på, hvornår hvert spors **første lyddata** ankom, aflæst
+med `time.monotonic()` i begge callbacks — samme ur, så tallene er
+sammenlignelige — og melodien forsinkes tilsvarende i mixet. Kompensation
+sker kun mellem 20 ms og 3 s; derudenfor logges det i stedet.
+
+To målemetoder er bevidst *fravalgt*: PortAudios ADC-tidsstempler (brugt
+v1.3.0–v1.6.0) har ikke fælles nulpunkt mellem to streams, og forskellen på
+sporlængder (v1.9.0) indeholder også pausen fra musikken stopper til der
+trykkes Stop. Længdeforskellen logges stadig som krydstjek. Disk-skrivning sker i en
 separat tråd, og tabte buffere (overbelastet PC) udløser en advarsel i
 gem-dialogen. De rå spor arkiveres desuden i
 `%APPDATA%\Sangoptager\raa_spor\` (seneste 10 optagelser / 14 dage), så en
