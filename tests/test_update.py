@@ -83,6 +83,33 @@ def test_parse_sha256(text, expected):
     assert parse_sha256(text) == expected
 
 
+@pytest.mark.parametrize("tag,current,expected", [
+    ("v1.5.0", "1.5.0", True),    # exe blev udskiftet
+    ("v1.5.0", "1.6.0", True),    # endnu nyere — også fint
+    ("v1.5.0", "1.4.0", False),   # kører stadig den gamle → mislykkedes
+    ("noget-vrøvl", "1.5.0", False),
+])
+def test_update_took_effect(tag, current, expected):
+    from sangoptager.update import update_took_effect
+
+    assert update_took_effect({"tag": tag}, current) is expected
+
+
+def test_pending_marker_roundtrip(tmp_path, monkeypatch):
+    """Markøren skal kunne skrives, læses én gang og derefter være væk —
+    ellers ville en gammel markør advare om en fejl der ikke skete."""
+    import sangoptager.update as upd
+
+    monkeypatch.setattr(upd, "_config_dir", lambda: str(tmp_path))
+    assert upd.take_pending_update() is None      # ingen markør endnu
+
+    upd.mark_update_pending("v1.5.0")
+    marker = upd.take_pending_update()
+    assert marker is not None and marker["tag"] == "v1.5.0"
+
+    assert upd.take_pending_update() is None      # forbrugt
+
+
 def test_file_sha256_matches_hashlib(tmp_path):
     import hashlib
 

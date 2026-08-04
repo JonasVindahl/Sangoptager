@@ -9,8 +9,13 @@ import sys
 import time
 import wave
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QDesktopServices,
+    QGuiApplication,
+    QKeySequence,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -37,10 +42,12 @@ from ..library import (
     retag_folder,
     unique_path,
 )
+from .. import __version__
 from ..logsetup import log
 from ..rawarchive import archive_recording
 from ..settings import Settings, temp_recording_dir
 from ..update import (
+    RELEASES_PAGE,
     UpdateCheckWorker,
     UpdateDownloadWorker,
     UpdateInfo,
@@ -48,6 +55,9 @@ from ..update import (
     install_dir,
     install_dir_writable,
     launch_updater,
+    mark_update_pending,
+    take_pending_update,
+    update_took_effect,
 )
 from .save_dialog import SaveDialog
 from .settings_dialog import SettingsDialog
@@ -180,6 +190,8 @@ class MainWindow(QMainWindow):
 
         self._update_check: UpdateCheckWorker | None = None
         self._update_dl: UpdateDownloadWorker | None = None
+        self._failed_update_tag: str | None = None
+        self._check_previous_update()
         if can_self_update():
             QTimer.singleShot(3000, self._check_updates)
 
@@ -202,6 +214,14 @@ class MainWindow(QMainWindow):
         title.setObjectName("titleLabel")
         self._title_label = title
         header.addWidget(title)
+
+        # Synligt versionsnummer: så man kan se med det samme, om en
+        # opdatering rent faktisk er slået igennem
+        self.version_label = QLabel(f"v{__version__}")
+        self.version_label.setObjectName("versionLabel")
+        self.version_label.setToolTip("Installeret version")
+        header.addWidget(self.version_label)
+
         header.addStretch(1)
         gear = QPushButton("⚙")
         gear.setObjectName("gear")
@@ -283,6 +303,7 @@ class MainWindow(QMainWindow):
     def _apply_scale(self, s: float):
         """Skalér typografi, metre og luft, så appens proportioner holder."""
         self._title_label.setStyleSheet(f"font-size: {round(16 * s)}px;")
+        self.version_label.setStyleSheet(f"font-size: {round(11 * s)}px;")
         self.device_label.setStyleSheet(f"font-size: {round(11 * s)}px;")
         self.timer_label.setStyleSheet(f"font-size: {round(40 * s)}px;")
         self.mic_meter.set_scale(s)
@@ -550,8 +571,52 @@ class MainWindow(QMainWindow):
         self._update_check.found.connect(self._update_found)
         self._update_check.start()
 
+    def _check_previous_update(self):
+        """Slog sidste opdateringsforsøg overhovedet igennem?
+
+        Uden det her kan en updater, der fejler i tavshed, blive ved med at
+        tilbyde den samme version ved hver opstart — appen genstarter jo som
+        den gamle udgave og finder "en ny version" igen.
+        """
+        marker = take_pending_update()
+        if marker is None:
+            return
+        tag = marker.get("tag", "?")
+        if update_took_effect(marker):
+            log.info("Opdatering til %s gennemført", tag)
+            self.status.showMessage(f"✓ Opdateret til {tag}")
+            return
+        self._failed_update_tag = tag
+        log.error("Opdatering til %s slog IKKE igennem — kører stadig v%s "
+                  "fra %s", tag, __version__, install_dir())
+        self._show_manual_update_banner(tag)
+
+    def _show_manual_update_banner(self, tag: str):
+        """Selv-opdateringen virker ikke her — send brugeren til download."""
+        self.update_label.setText(
+            f"Opdateringen til {tag} gik ikke igennem — appen kører stadig "
+            f"v{__version__}. Hent den nye version manuelt."
+        )
+        self.update_btn.setText("Hent manuelt")
+        try:
+            self.update_btn.clicked.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self.update_btn.clicked.connect(self._open_releases_page)
+        self.update_btn.setEnabled(True)
+        self.update_btn.show()
+        self.update_banner.show()
+
+    def _open_releases_page(self):
+        QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
+
     def _update_found(self, info: UpdateInfo):
         self._update_info = info
+        if self._failed_update_tag == info.tag:
+            # Selv-opdatering til netop denne version er allerede prøvet og
+            # mislykkedes — tilbyd ikke den samme knap igen
+            self._show_manual_update_banner(info.tag)
+            return
         if not install_dir_writable():
             # Fx pakket ud i Program Files: sig det i stedet for at hente
             # hele zippen og fejle bagefter
@@ -583,6 +648,9 @@ class MainWindow(QMainWindow):
 
     def _apply_update(self, new_dir: str, tmp_root: str):
         self.update_label.setText("Genstarter…")
+        # Notér hvad vi forsøger, så næste opstart kan afsløre, om exe'en
+        # rent faktisk blev udskiftet
+        mark_update_pending(self._update_info.tag)
         launch_updater(new_dir, tmp_root)
         self.close()
 

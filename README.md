@@ -44,6 +44,12 @@ skæv optagelse kan re-mixes i stedet for at skulle synges om.
 version, vises et banner med "Opdatér nu" — appen downloader, verificerer
 zippens SHA256 mod releasens `.sha256`-fil, udskifter sig selv og genstarter.
 
+Den installerede version står i **øverste venstre hjørne** ved siden af navnet,
+så man altid kan se, om en opdatering rent faktisk er slået igennem. Skete
+udskiftningen ikke — updateren fejlede i tavshed — opdager appen det ved næste
+opstart og skifter banneret ud med "Hent manuelt", der åbner download-siden,
+i stedet for at tilbyde den samme opdatering igen og igen.
+
 Opdateringen rammer **den mappe appen faktisk kører fra** (`sys.executable`),
 ikke en hardkodet sti — så en genvej på skrivebordet peger på samme exe
 bagefter og bliver ved med at virke, uanset hvor mappen ligger. Kun appens

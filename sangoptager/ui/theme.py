@@ -61,6 +61,15 @@ QLabel#deviceLabel, QLabel#hintLabel {{
     color: {SUBTEXT};
     font-size: 11px;
 }}
+QLabel#versionLabel {{
+    color: {SUBTEXT};
+    font-family: "Consolas", "Menlo", "SF Mono", monospace;
+    font-size: 11px;
+    background: {SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 2px 7px;
+}}
 QLabel#timerLabel {{
     font-family: "Consolas", "Menlo", "SF Mono", monospace;
     font-size: 40px;

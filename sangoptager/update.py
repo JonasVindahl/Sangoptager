@@ -32,6 +32,7 @@ REPO = "JonasVindahl/Sangoptager"
 ASSET_NAME = "Sangoptager-windows.zip"
 CHECKSUM_NAME = ASSET_NAME + ".sha256"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
+RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 EXE_NAME = "Sangoptager.exe"
 
 _HEADERS = {
@@ -118,6 +119,51 @@ def parse_sha256(text: str) -> str | None:
     return match.group(1).lower() if match else None
 
 
+def _pending_marker_path() -> str:
+    return os.path.join(_config_dir(), "opdatering_ventende.json")
+
+
+def mark_update_pending(tag: str) -> None:
+    """Notér hvilken version updateren er ved at installere.
+
+    Ved næste opstart afsløres det, om udskiftningen faktisk skete — ellers
+    ville en updater, der fejler i tavshed, bare tilbyde den samme opdatering
+    igen og igen.
+    """
+    try:
+        with open(_pending_marker_path(), "w", encoding="utf-8") as fh:
+            json.dump({"tag": tag, "fra": __version__}, fh)
+    except OSError as exc:
+        log.warning("Kunne ikke skrive opdaterings-markør: %s", exc)
+
+
+def take_pending_update() -> dict | None:
+    """Læs og fjern markøren fra sidste opdateringsforsøg."""
+    path = _pending_marker_path()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return data if isinstance(data, dict) and data.get("tag") else None
+
+
+def update_took_effect(marker: dict, current: str = __version__) -> bool:
+    """Blev den ventende opdatering rent faktisk installeret?
+
+    True når den kørende version er nået op på (eller forbi) den ventede —
+    altså når exe'en faktisk blev udskiftet.
+    """
+    try:
+        return _parse_version(current) >= _parse_version(marker["tag"])
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
 def file_sha256(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -195,9 +241,14 @@ class UpdateCheckWorker(QThread):
             log.info("Opdaterings-tjek sprang over: %s", exc)
             return
         if info is not None:
-            log.info("Ny version fundet: %s (%d MB)",
-                     info.tag, info.size // 1_048_576)
+            # Begge sider af sammenligningen i loggen: så kan man altid se,
+            # om appen faktisk kører den version, den tror
+            log.info("Ny version fundet: %s (kører selv v%s, %d MB)",
+                     info.tag, __version__, info.size // 1_048_576)
             self.found.emit(info)
+        else:
+            log.info("Opdaterings-tjek: ingen nyere version (kører v%s)",
+                     __version__)
 
 
 class UpdateDownloadWorker(QThread):
