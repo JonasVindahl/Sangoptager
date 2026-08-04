@@ -502,7 +502,9 @@ class MainWindow(QMainWindow):
                  "overflows=%d, sporlængder=%s/%s sek",
                  p.duration, p.mic_peak, p.loop_peak,
                  p.overflows, p.mic_seconds, p.loop_seconds)
-        if p.loop_lead_silence_ms:
+        # Kun værd at nævne ved en reel pause; brøkdele af et millisekund er
+        # bare buffer-granularitet og ville skrive "0.0 sek" i loggen
+        if p.loop_lead_silence_ms and p.loop_lead_silence_ms >= 100:
             log.info("Melodien begyndte at spille %.1f sek inde i optagelsen "
                      "— hullet er fyldt med stilhed, så sporene er synkrone",
                      p.loop_lead_silence_ms / 1000)
