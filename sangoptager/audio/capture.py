@@ -146,6 +146,20 @@ class _WavWriter:
         self._closed.wait(timeout=15)
 
 
+def compute_start_offset_ms(mic_seconds: float | None,
+                            loop_seconds: float | None) -> float | None:
+    """Startforskydning i ms ud fra sporenes længde (positiv = mic startede først).
+
+    Begge streams stoppes samtidig (se _WindowsBackend.stop), så forskellen i
+    optaget længde ér forskellen i starttidspunkt. Målingen sker i hver streams
+    egne sample-tællinger og er derfor pålidelig — modsat ADC-tidsstemplerne i
+    compute_offset_ms, som ikke har fælles nulpunkt.
+    """
+    if mic_seconds is None or loop_seconds is None:
+        return None
+    return (mic_seconds - loop_seconds) * 1000.0
+
+
 def compute_offset_ms(mic_ts: float | None, loop_ts: float | None,
                       same_clock: bool = True) -> float | None:
     """Forskel mellem sporenes første tidsstempler i ms — KUN til diagnostik.
@@ -168,7 +182,8 @@ class RecordingResult:
                  mic_seconds: float | None = None,
                  loop_seconds: float | None = None,
                  disk_failed: bool = False,
-                 loop_tail_silence: float | None = None):
+                 loop_tail_silence: float | None = None,
+                 start_offset_ms: float | None = None):
         self.mic_path = mic_path
         self.loop_path = loop_path
         self.duration = duration
@@ -178,6 +193,8 @@ class RecordingResult:
         # Diagnostisk tidsstempel-difference mellem sporene (se
         # compute_offset_ms) — bruges kun i log og arkiv, aldrig i mixet
         self.offset_ms = offset_ms
+        # Målt startforskydning ud fra sporlængder — DEN kompenseres i mixet
+        self.start_offset_ms = start_offset_ms
         self.overflows = overflows
         self.mic_seconds = mic_seconds
         self.loop_seconds = loop_seconds
@@ -219,7 +236,9 @@ def _collect_stats(mic_writer: _WavWriter | None, loop_writer: _WavWriter | None
                 mic_peak=mic_peak, loop_peak=loop_peak,
                 offset_ms=offset_ms, overflows=overflows,
                 mic_seconds=mic_seconds, loop_seconds=loop_seconds,
-                disk_failed=disk_failed, loop_tail_silence=loop_tail_silence)
+                disk_failed=disk_failed, loop_tail_silence=loop_tail_silence,
+                start_offset_ms=compute_start_offset_ms(mic_seconds,
+                                                        loop_seconds))
 
 
 class DualRecorder:
@@ -399,6 +418,9 @@ class _WindowsBackend:
             writer.write(in_data)
             return (None, pyaudio.paContinue)
 
+        # start=False: den dyre enhedsinitiering sker her, men optagelsen
+        # begynder først ved start_stream() — så begge spor kan sættes i gang
+        # på samme tid i stedet for med en hel WASAPI-opstart imellem sig
         stream = self._pa.open(
             format=pyaudio.paInt16,
             channels=channels,
@@ -407,6 +429,7 @@ class _WindowsBackend:
             input_device_index=dev_info["index"],
             frames_per_buffer=_FRAMES_PER_BUFFER,
             stream_callback=callback,
+            start=False,
         )
         self._streams.append(stream)
 
@@ -431,10 +454,24 @@ class _WindowsBackend:
             self._writers.append(self._loop_writer)
             self._open_stream(self._loop_info, self._loop_writer, loop_ch, loop_rate)
 
+        # Begge enheder er nu klar — sæt dem i gang lige efter hinanden.
+        # Tidligere startede mikrofonen ved åbning, mens loopback-enheden
+        # stadig blev initialiseret, hvilket kostede op mod et sekunds
+        # forskydning mellem sporene.
+        for stream in self._streams:
+            stream.start_stream()
+
     def stop(self):
+        # Stop alle streams FØR nogen lukkes: close() kan tage tid, og imens
+        # ville den anden stream optage videre og forurene sporlængderne,
+        # som vi bruger til at måle startforskydningen
         for stream in self._streams:
             try:
                 stream.stop_stream()
+            except OSError:
+                pass
+        for stream in self._streams:
+            try:
                 stream.close()
             except OSError:
                 pass

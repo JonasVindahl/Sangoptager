@@ -31,14 +31,19 @@ midt i det hele, siger statuslinjen til med det samme. Appen kan kun køre i
 én instans — endnu et dobbeltklik fronter bare det åbne vindue.
 Fejlsøgning: `%APPDATA%\Sangoptager\app.log`.
 
-**Synkronisering:** De to spor mixes nøjagtig som de blev optaget — der
-tidsforskydes aldrig. Fra v1.3.0 til v1.6.0 blev sporenes første
-ADC-tidsstempler trukket fra hinanden og brugt som "startforskydning", men
-mikrofon og loopback er to uafhængige PortAudio-streams, hvis tidsstempler
-ikke har fælles nulpunkt. Differencen var derfor ikke en ægte forskydning,
-og kompensationen kunne skubbe stemmen op til et halvt sekund væk fra
-melodien. Differencen måles stadig og skrives i loggen som diagnostik, men
-røres aldrig i mixet. Disk-skrivning sker i en
+**Synkronisering:** De to enheder gøres klar hver for sig og sættes derefter
+i gang samtidig, så begge spor begynder på samme tid. Tidligere startede
+mikrofonen allerede, mens loopback-enheden stadig blev initialiseret — målt
+til op mod 800 ms — så melodisporet manglede sin begyndelse, og musikken lå
+forud for stemmen i hele sangen.
+
+Er der en rest tilbage, rettes den i mixet ud fra **sporlængderne**: begge
+streams stoppes samtidig, så forskellen i optaget længde ér forskellen i
+starttidspunkt, målt i sample-tællinger. Kompensation sker kun mellem 20 ms
+og 3 s; derudenfor logges det i stedet. Fra v1.3.0 til v1.6.0 blev der i
+stedet brugt PortAudios ADC-tidsstempler, men de to streams har ikke fælles
+nulpunkt, så den værdi var ikke en ægte forskydning — den måles stadig og
+logges som `adc-offset`, men bruges aldrig i mixet. Disk-skrivning sker i en
 separat tråd, og tabte buffere (overbelastet PC) udløser en advarsel i
 gem-dialogen. De rå spor arkiveres desuden i
 `%APPDATA%\Sangoptager\raa_spor\` (seneste 10 optagelser / 14 dage), så en

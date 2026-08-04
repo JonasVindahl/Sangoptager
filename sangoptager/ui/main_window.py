@@ -34,7 +34,7 @@ from ..audio.capture import (
     DualRecorder,
     RecordingResult,
 )
-from ..audio.mixdown import MixdownError, mixdown
+from ..audio.mixdown import OFFSET_MAX_MS, MixdownError, mixdown
 from ..library import (
     album_folder,
     build_filename,
@@ -87,7 +87,8 @@ class SaveWorker(QThread):
 
             tmp_mp3 = os.path.join(temp_recording_dir(), "mix.mp3")
             mixdown(self._result.mic_path, self._result.loop_path,
-                    tmp_mp3, self._balance, self._settings.normalize)
+                    tmp_mp3, self._balance, self._settings.normalize,
+                    self._result.start_offset_ms)
 
             dest = unique_path(
                 os.path.join(dest_dir, build_filename(self._title, now)))
@@ -333,11 +334,20 @@ class MainWindow(QMainWindow):
             return
         self._titles_worker = TitlesWorker(self.settings.output_dir, self)
         self._titles_worker.done.connect(self._titles_ready)
-        self._titles_worker.finished.connect(self._titles_worker.deleteLater)
+        self._titles_worker.finished.connect(self._titles_finished)
         self._titles_worker.start()
 
     def _titles_ready(self, titles: list):
         self._titles = titles
+
+    def _titles_finished(self):
+        """Slip tråden, når den er færdig. Referencen SKAL ryddes samtidig —
+        ellers kalder næste _refresh_titles isRunning() på et slettet
+        C++-objekt, og PySide6 rejser RuntimeError."""
+        worker = self._titles_worker
+        self._titles_worker = None
+        if worker is not None:
+            worker.deleteLater()
 
     def _open_settings(self):
         mics = self.recorder.list_mics() if self.recorder else []
@@ -490,14 +500,22 @@ class MainWindow(QMainWindow):
         self.status.showMessage("Optagelse stoppet")
         p = self.pending
         log.info("Optagelse stoppet: %.1f sek, peak stemme=%s melodi=%s, "
-                 "offset=%s ms, overflows=%d, sporlængder=%s/%s sek",
+                 "startforskydning=%s ms, adc-offset=%s ms, overflows=%d, "
+                 "sporlængder=%s/%s sek",
                  p.duration, p.mic_peak, p.loop_peak,
+                 None if p.start_offset_ms is None
+                 else round(p.start_offset_ms, 1),
                  None if p.offset_ms is None else round(p.offset_ms, 1),
                  p.overflows, p.mic_seconds, p.loop_seconds)
-        if p.mic_seconds and p.loop_seconds \
-                and abs(p.mic_seconds - p.loop_seconds) > 0.04:
-            log.warning("Sporlængder afviger %.0f ms — muligt clock-drift",
-                        abs(p.mic_seconds - p.loop_seconds) * 1000)
+        if p.start_offset_ms is not None and abs(p.start_offset_ms) >= 40:
+            later = "melodien" if p.start_offset_ms > 0 else "mikrofonen"
+            if abs(p.start_offset_ms) <= OFFSET_MAX_MS:
+                log.info("%s startede %.0f ms senere — kompenseres i mixet",
+                         later.capitalize(), abs(p.start_offset_ms))
+            else:
+                log.warning("%s startede %.0f ms senere — uden for det "
+                            "kompenserbare interval, mixet rettes IKKE",
+                            later.capitalize(), abs(p.start_offset_ms))
         self._resolve_pending()
 
     def _resolve_pending(self):

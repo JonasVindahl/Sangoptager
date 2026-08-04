@@ -15,7 +15,7 @@ import wave
 import numpy as np
 import pytest
 
-from sangoptager.audio.capture import compute_offset_ms
+from sangoptager.audio.capture import compute_offset_ms, compute_start_offset_ms
 from sangoptager.audio.mixdown import build_filter, mixdown
 
 needs_ffmpeg = pytest.mark.skipif(
@@ -39,32 +39,60 @@ def test_offset_none_on_missing_or_mixed_clocks():
     assert compute_offset_ms(10.08, 10.0, same_clock=False) is None
 
 
-# ── build_filter må aldrig forsinke et spor ──────────────────────────────────
+# ── startforskydning ud fra sporlængder ──────────────────────────────────────
 
-@pytest.mark.parametrize("normalize", [True, False])
-def test_filter_never_delays_a_track(normalize):
-    filt = build_filter(1.0, 1.0, normalize)
-    assert "adelay" not in filt
-    assert "atrim" not in filt
-    assert "asetpts" not in filt
+def test_start_offset_positive_when_mic_recorded_longer():
+    """Mic 49.39 s / melodi 48.60 s (rigtige tal fra app.log) = melodien
+    startede 791 ms for sent."""
+    assert compute_start_offset_ms(49.388843537414964, 48.59733333333333) == \
+        pytest.approx(791.5, abs=0.5)
 
 
-def test_filter_applies_balance_gains():
-    filt = build_filter(0.8, 1.2, normalize=False)
-    assert "volume=0.8000" in filt
-    assert "volume=1.2000" in filt
+def test_start_offset_negative_when_loop_recorded_longer():
+    assert compute_start_offset_ms(48.0, 48.25) == pytest.approx(-250.0)
+
+
+def test_start_offset_none_without_both_tracks():
+    assert compute_start_offset_ms(None, 10.0) is None
+    assert compute_start_offset_ms(10.0, None) is None
+
+
+# ── build_filter: kompensér KUN ud fra sporlængde-målingen ───────────────────
+
+def test_filter_delays_melody_when_mic_started_first():
+    filt = build_filter(1.0, 1.0, normalize=False, start_offset_ms=791.5)
+    voc = filt.split("[voc]")[0]
+    mel = filt.split("[voc];")[1].split("[mel]")[0]
+    assert "adelay" not in voc
+    assert "adelay=792:all=1" in mel
+
+
+def test_filter_delays_mic_when_melody_started_first():
+    filt = build_filter(1.0, 1.0, normalize=False, start_offset_ms=-120)
+    voc = filt.split("[voc]")[0]
+    mel = filt.split("[voc];")[1].split("[mel]")[0]
+    assert "adelay=120:all=1" in voc
+    assert "adelay" not in mel
+
+
+@pytest.mark.parametrize("offset", [None, 0, 5, -19, 3500, -9000])
+def test_filter_skips_compensation_outside_sane_range(offset):
+    assert "adelay" not in build_filter(1.0, 1.0, False, start_offset_ms=offset)
 
 
 def test_filter_single_input_is_just_finisher():
     assert build_filter(1.0, 1.0, False, two_inputs=False) == "alimiter=limit=0.97"
 
 
-def test_mixdown_signature_has_no_offset():
-    """Værn mod at kompensationen sniger sig ind igen ad bagvejen."""
+def test_adc_offset_can_never_reach_the_mix():
+    """ADC-tidsstemplerne har ikke fælles nulpunkt — de skævvred mixet i
+    v1.3.0-v1.6.0 og må aldrig kunne bruges som filter-parameter igen."""
     import inspect
 
-    assert "offset" not in str(inspect.signature(mixdown))
-    assert "offset" not in str(inspect.signature(build_filter))
+    for fn in (mixdown, build_filter):
+        params = inspect.signature(fn).parameters
+        assert "offset_ms" not in params
+        assert "start_offset_ms" in params
 
 
 # ── Funktionelt bevis: klik beholder deres indbyrdes afstand ─────────────────
@@ -134,3 +162,38 @@ def test_mixdown_keeps_click_at_absolute_position(tmp_path):
     mixdown(mic, mel, out, balance=0.5, normalize=False)
     first, _ = _click_positions(out)
     assert first == pytest.approx(1.000, abs=0.020)
+
+
+@needs_ffmpeg
+def test_compensation_realigns_late_starting_melody(tmp_path):
+    """Gengiv den fejl loggen viste: melodi-streamen startede 792 ms for sent,
+    så melodisporet mangler sin begyndelse.
+
+    Melodiens klik falder i virkeligheden ved 1,0 s, men ligger 792 ms tidligere
+    i filen (0,208 s), fordi optagelsen først begyndte da. Mikrofonens klik
+    falder ved 2,0 s. Efter kompensation skal afstanden i mixet være 1,000 s —
+    ikke 1,792 s.
+    """
+    mel = str(tmp_path / "melodi.wav")
+    mic = str(tmp_path / "mic.wav")
+    _write_click_wav(mel, click_at_s=0.208)
+    _write_click_wav(mic, click_at_s=2.0, seconds=4.0)
+
+    out = str(tmp_path / "mix.mp3")
+    mixdown(mic, mel, out, balance=0.5, normalize=False, start_offset_ms=791.5)
+    t1, t2 = _click_positions(out)
+    assert t2 - t1 == pytest.approx(1.000, abs=0.010)
+
+
+@needs_ffmpeg
+def test_without_compensation_late_melody_stays_misaligned(tmp_path):
+    """Kontrol: uden kompensation er afstanden 1,792 s — altså skæv."""
+    mel = str(tmp_path / "melodi.wav")
+    mic = str(tmp_path / "mic.wav")
+    _write_click_wav(mel, click_at_s=0.208)
+    _write_click_wav(mic, click_at_s=2.0, seconds=4.0)
+
+    out = str(tmp_path / "mix.mp3")
+    mixdown(mic, mel, out, balance=0.5, normalize=False)
+    t1, t2 = _click_positions(out)
+    assert t2 - t1 == pytest.approx(1.792, abs=0.010)
