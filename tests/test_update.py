@@ -58,10 +58,38 @@ def test_updater_mirrors_only_internal_dir():
 
 def test_updater_falls_back_to_old_app_on_failure():
     bat = _bat()
-    assert "if errorlevel 8 goto fejl" in bat
+    assert "if %RC% geq 8 goto fejl" in bat
     fejl = bat[bat.index(":fejl"):]
     assert "start" in fejl          # den gamle app startes igen
     assert "rmdir" not in fejl      # temp bevares til fejlsøgning
+
+
+def test_updater_waits_without_needing_a_console():
+    """`timeout` kræver en konsol og fejler øjeblikkeligt uden — så bliver
+    vente-løkken et CPU-spin. `ping` virker uanset."""
+    bat = _bat()
+    assert "timeout" not in bat
+    assert "ping -n 2 127.0.0.1" in bat
+
+
+def test_updater_logs_every_step():
+    """En mislykket opdatering skal kunne fejlsøges bagefter, så robocopys
+    exitkode og output skal i logfilen — også når det lykkes."""
+    bat = _bat()
+    assert bat.count('>> "%LOG%"') >= 5
+    assert 'robocopy' in bat and '>> "%LOG%" 2>&1' in bat
+    assert "exitkode %RC%" in bat
+    # errorlevel skal gemmes FØR echo, som ellers nulstiller den
+    rod = bat[bat.index("robocopy"):]
+    assert rod.index("set RC=%errorlevel%") < rod.index("echo [%date%")
+
+
+def test_updater_avoids_errorlevel_inside_blocks():
+    """%errorlevel% i en ()-blok udvides ved parsing og ville være forældet.
+    Derfor må _internal-grenen ikke ligge i en blok."""
+    bat = _bat()
+    assert "if not exist" in bat and "goto klar" in bat
+    assert "if errorlevel 8 goto fejl\n)" not in bat
 
 
 def test_updater_targets_actual_install_dir():

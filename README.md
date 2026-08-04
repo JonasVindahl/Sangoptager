@@ -66,8 +66,10 @@ bagefter og bliver ved med at virke, uanset hvor mappen ligger. Kun appens
 egen `_internal\`-mappe spejles (`/MIR`); selve programmappen kopieres
 additivt, så filer man selv har lagt der ikke slettes. Kan mappen ikke skrives
 (fx `C:\Program Files`), siger banneret det i stedet for at hente forgæves.
-Går noget galt undervejs, startes den gamle version igen, og årsagen skrives
-til `%APPDATA%\Sangoptager\opdatering_fejl.log`.
+Går noget galt undervejs, startes den gamle version igen. Hele forløbet —
+robocopys output og exitkoder, også når det lykkes — skrives til
+`%APPDATA%\Sangoptager\opdatering_fejl.log`, så en mislykket opdatering kan
+fejlsøges bagefter i stedet for at være en gætteleg.
 
 Indstillinger (⚙): valg af **mikrofon** og **melodikilde** (hvilken højttaler
 melodien afspilles på), sync-mappe, kunstnernavn og manuelt opdaterings-tjek. Gemmes i

@@ -179,32 +179,54 @@ def build_updater_bat(new_dir: str, install_dir: str, pid: int,
     Ventetjekket matcher på exe-navnet (ikke PID-tallet, som ville substring-
     matche fremmede PID'er). Kun appens egen _internal-mappe spejles med /MIR;
     roden kopieres oveni, så filer brugeren selv har lagt i mappen aldrig
-    slettes. Fejler robocopy (exitkode >= 8), logges det, temp-mappen bevares
-    til fejlsøgning, og den gamle app genstartes i stedet."""
+    slettes. Fejler robocopy (exitkode >= 8), bevares temp-mappen, og den
+    gamle app genstartes.
+
+    Der ventes med `ping` i stedet for `timeout`: sidstnævnte kræver en konsol
+    og fejler øjeblikkeligt uden — hvilket gjorde vente-løkken til et CPU-spin.
+
+    Hvert skridt skrives til logfilen, også når det lykkes. Uden det er en
+    mislykket opdatering umulig at fejlsøge bagefter.
+    """
     # Bat'en kører altid på Windows — join med backslash uanset hvilken
     # platform den blev skrevet på (testene kører også på macOS/Linux)
     exe_path = install_dir.rstrip("\\/") + "\\" + EXE_NAME
+    # %errorlevel% gemmes i en variabel med det samme: echo nulstiller den,
+    # og inde i ()-blokke ville den blive udvidet allerede ved parsing
     return f"""@echo off
+set "LOG={error_log}"
+echo. >> "%LOG%"
+echo [%date% %time%] Opdatering start -^> "{install_dir}" >> "%LOG%"
+
 :wait
 tasklist /FI "PID eq {pid}" 2>nul | find /I "{EXE_NAME}" >nul
 if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
+    ping -n 2 127.0.0.1 >nul
     goto wait
 )
-robocopy "{new_dir}" "{install_dir}" /E /XD _internal /R:10 /W:1 >nul
-if errorlevel 8 goto fejl
-if exist "{new_dir}\\_internal" (
-    robocopy "{new_dir}\\_internal" "{install_dir}\\_internal" /MIR /R:10 /W:1 >nul
-    if errorlevel 8 goto fejl
-)
+echo [%date% %time%] Appen er lukket - kopierer filer >> "%LOG%"
+
+robocopy "{new_dir}" "{install_dir}" /E /XD _internal /R:10 /W:1 >> "%LOG%" 2>&1
+set RC=%errorlevel%
+echo [%date% %time%] robocopy programmappe: exitkode %RC% >> "%LOG%"
+if %RC% geq 8 goto fejl
+
+if not exist "{new_dir}\\_internal" goto klar
+robocopy "{new_dir}\\_internal" "{install_dir}\\_internal" /MIR /R:10 /W:1 >> "%LOG%" 2>&1
+set RC=%errorlevel%
+echo [%date% %time%] robocopy _internal: exitkode %RC% >> "%LOG%"
+if %RC% geq 8 goto fejl
+
+:klar
 if not exist "{exe_path}" goto fejl
+echo [%date% %time%] Filer udskiftet - starter appen >> "%LOG%"
 start "" "{exe_path}"
-timeout /t 2 /nobreak >nul
+ping -n 3 127.0.0.1 >nul
 rmdir /s /q "{tmp_root}"
 exit /b
 
 :fejl
-echo %date% %time% Opdatering fejlede - se {tmp_root} >> "{error_log}"
+echo [%date% %time%] FEJLEDE - temp beholdt: "{tmp_root}" >> "%LOG%"
 if exist "{exe_path}" start "" "{exe_path}"
 exit /b
 """
@@ -219,11 +241,13 @@ def launch_updater(new_dir: str, tmp_root: str) -> None:
         fh.write(build_updater_bat(new_dir, target, os.getpid(),
                                    tmp_root, error_log))
 
-    DETACHED_PROCESS = 0x00000008
+    # KUN CREATE_NO_WINDOW: den giver en skjult konsol, så bat-kommandoerne
+    # virker. DETACHED_PROCESS gav slet ingen konsol, hvilket fik `timeout`
+    # til at fejle øjeblikkeligt. Processen overlever fint at appen lukker.
     CREATE_NO_WINDOW = 0x08000000
     subprocess.Popen(
         ["cmd", "/c", bat_path],
-        creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
+        creationflags=CREATE_NO_WINDOW,
         close_fds=True,
     )
     log.info("Updater startet: %s → %s", new_dir, target)
