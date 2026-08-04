@@ -343,7 +343,8 @@ class MainWindow(QMainWindow):
         mics = self.recorder.list_mics() if self.recorder else []
         loopbacks = self.recorder.list_loopbacks() if self.recorder else []
         old_output = self.settings.output_dir
-        dialog = SettingsDialog(self.settings, mics, loopbacks, self)
+        dialog = SettingsDialog(self.settings, mics, loopbacks, self,
+                                on_update_found=self._update_found)
         dialog.exec()
         if dialog.devices_changed and not self.recording:
             if self.recorder:
@@ -590,20 +591,25 @@ class MainWindow(QMainWindow):
                   "fra %s", tag, __version__, install_dir())
         self._show_manual_update_banner(tag)
 
+    def _set_update_button(self, text: str, handler):
+        """Sæt bannerknappens tekst og handling — den skifter mellem
+        'Opdatér nu' og 'Hent manuelt', så begge dele skal nulstilles samlet."""
+        self.update_btn.setText(text)
+        try:
+            self.update_btn.clicked.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self.update_btn.clicked.connect(handler)
+        self.update_btn.setEnabled(True)
+        self.update_btn.show()
+
     def _show_manual_update_banner(self, tag: str):
         """Selv-opdateringen virker ikke her — send brugeren til download."""
         self.update_label.setText(
             f"Opdateringen til {tag} gik ikke igennem — appen kører stadig "
             f"v{__version__}. Hent den nye version manuelt."
         )
-        self.update_btn.setText("Hent manuelt")
-        try:
-            self.update_btn.clicked.disconnect()
-        except (RuntimeError, TypeError):
-            pass
-        self.update_btn.clicked.connect(self._open_releases_page)
-        self.update_btn.setEnabled(True)
-        self.update_btn.show()
+        self._set_update_button("Hent manuelt", self._open_releases_page)
         self.update_banner.show()
 
     def _open_releases_page(self):
@@ -611,6 +617,15 @@ class MainWindow(QMainWindow):
 
     def _update_found(self, info: UpdateInfo):
         self._update_info = info
+        if not can_self_update():
+            # Udviklingskørsel (ikke den byggede exe): vis kun beskeden —
+            # updateren ville ellers forsøge at udskifte Pythons egen mappe
+            self.update_label.setText(
+                f"Ny version {info.tag} findes — hent den fra GitHub."
+            )
+            self._set_update_button("Hent manuelt", self._open_releases_page)
+            self.update_banner.show()
+            return
         if self._failed_update_tag == info.tag:
             # Selv-opdatering til netop denne version er allerede prøvet og
             # mislykkedes — tilbyd ikke den samme knap igen
@@ -627,7 +642,7 @@ class MainWindow(QMainWindow):
             self.update_btn.hide()
         else:
             self.update_label.setText(f"Ny version {info.tag} er klar")
-            self.update_btn.setEnabled(True)
+            self._set_update_button("Opdatér nu", self._start_update)
         self.update_banner.show()
 
     def _start_update(self):

@@ -230,15 +230,23 @@ def launch_updater(new_dir: str, tmp_root: str) -> None:
 
 
 class UpdateCheckWorker(QThread):
-    """Baggrundstjek ved opstart. found udsendes kun ved nyere version."""
+    """Tjek for ny version.
 
-    found = Signal(object)  # UpdateInfo
+    found udsendes kun ved nyere version — så det automatiske tjek ved
+    opstart kan nøjes med den og forblive tavst. up_to_date og failed
+    bruges af det manuelle tjek, der skal svare uanset udfaldet.
+    """
+
+    found = Signal(object)      # UpdateInfo
+    up_to_date = Signal()
+    failed = Signal(str)
 
     def run(self):
         try:
             info = check_for_update()
         except Exception as exc:  # offline/ratelimit — stilhed, prøv næste start
             log.info("Opdaterings-tjek sprang over: %s", exc)
+            self.failed.emit(str(exc))
             return
         if info is not None:
             # Begge sider af sammenligningen i loggen: så kan man altid se,
@@ -249,6 +257,7 @@ class UpdateCheckWorker(QThread):
         else:
             log.info("Opdaterings-tjek: ingen nyere version (kører v%s)",
                      __version__)
+            self.up_to_date.emit()
 
 
 class UpdateDownloadWorker(QThread):

@@ -19,7 +19,9 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 
+from .. import __version__
 from ..settings import Settings
+from ..update import UpdateCheckWorker
 
 AUTO = "Automatisk (systemets standard)"
 
@@ -28,12 +30,14 @@ class SettingsDialog(QDialog):
     """Sat .devices_changed hvis mikrofon/melodikilde blev ændret."""
 
     def __init__(self, settings: Settings, mics: list[str], loopbacks: list[str],
-                 parent=None):
+                 parent=None, on_update_found=None):
         super().__init__(parent)
         self.setWindowTitle("Indstillinger")
         self.setMinimumWidth(460)
         self._settings = settings
         self.devices_changed = False
+        self._on_update_found = on_update_found
+        self._update_worker: UpdateCheckWorker | None = None
 
         form = QFormLayout(self)
         form.setVerticalSpacing(12)
@@ -79,6 +83,17 @@ class SettingsDialog(QDialog):
         self._normalize_check.setChecked(settings.normalize)
         form.addRow("Lydstyrke:", self._normalize_check)
 
+        update_row = QHBoxLayout()
+        self._update_status = QLabel(f"Installeret version: v{__version__}")
+        self._update_status.setObjectName("hintLabel")
+        self._update_status.setWordWrap(True)
+        self._check_btn = QPushButton("Søg nu")
+        self._check_btn.setToolTip("Se om der er en nyere version")
+        self._check_btn.clicked.connect(self._check_update)
+        update_row.addWidget(self._update_status, stretch=1)
+        update_row.addWidget(self._check_btn)
+        form.addRow("Opdatering:", update_row)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Gem")
         buttons.button(QDialogButtonBox.Ok).setObjectName("primary")
@@ -86,6 +101,46 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
+
+    # ── Manuelt opdaterings-tjek ───────────────────────────────────────────
+
+    def _check_update(self):
+        if self._update_worker is not None and self._update_worker.isRunning():
+            return
+        self._check_btn.setEnabled(False)
+        self._update_status.setText("Søger efter opdatering…")
+        self._update_worker = UpdateCheckWorker(self)
+        self._update_worker.found.connect(self._update_available)
+        self._update_worker.up_to_date.connect(self._update_none)
+        self._update_worker.failed.connect(self._update_check_failed)
+        self._update_worker.start()
+
+    def _update_available(self, info):
+        self._update_status.setText(
+            f"Ny version {info.tag} er klar — luk vinduet her og brug "
+            "banneret i hovedvinduet."
+        )
+        self._check_btn.setEnabled(True)
+        if self._on_update_found is not None:
+            self._on_update_found(info)
+
+    def _update_none(self):
+        self._update_status.setText(
+            f"v{__version__} er den nyeste — alt er opdateret."
+        )
+        self._check_btn.setEnabled(True)
+
+    def _update_check_failed(self, message: str):
+        self._update_status.setText(
+            f"Kunne ikke tjekke lige nu (er der internet?) — v{__version__}"
+        )
+        self._check_btn.setEnabled(True)
+
+    def done(self, result):
+        # QThread må ikke destrueres mens den kører — vent den ud først
+        if self._update_worker is not None and self._update_worker.isRunning():
+            self._update_worker.wait(10_000)
+        super().done(result)
 
     def _browse(self):
         chosen = QFileDialog.getExistingDirectory(

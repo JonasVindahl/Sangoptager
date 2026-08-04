@@ -49,7 +49,9 @@ version, vises et banner med "Opdatér nu" — appen downloader, verificerer
 zippens SHA256 mod releasens `.sha256`-fil, udskifter sig selv og genstarter.
 
 Den installerede version står i **øverste venstre hjørne** ved siden af navnet,
-så man altid kan se, om en opdatering rent faktisk er slået igennem. Skete
+så man altid kan se, om en opdatering rent faktisk er slået igennem. Vil man
+ikke vente på næste opstart, ligger der et **"Søg nu"** under ⚙ →
+*Opdatering*, som svarer med det samme — også når alt er opdateret. Skete
 udskiftningen ikke — updateren fejlede i tavshed — opdager appen det ved næste
 opstart og skifter banneret ud med "Hent manuelt", der åbner download-siden,
 i stedet for at tilbyde den samme opdatering igen og igen.
@@ -64,7 +66,7 @@ Går noget galt undervejs, startes den gamle version igen, og årsagen skrives
 til `%APPDATA%\Sangoptager\opdatering_fejl.log`.
 
 Indstillinger (⚙): valg af **mikrofon** og **melodikilde** (hvilken højttaler
-melodien afspilles på), sync-mappe og kunstnernavn. Gemmes i
+melodien afspilles på), sync-mappe, kunstnernavn og manuelt opdaterings-tjek. Gemmes i
 `%APPDATA%\Sangoptager\config.json`. Skift til Syncthing = peg bare
 sync-mappen et andet sted hen. Niveaumetrene viser RMS med peak-hold og
 dB-udlæsning, så man kan se at begge kilder har signal, før man synger løs.
