@@ -23,30 +23,75 @@ jobs:
       - name: Installér afhængigheder
         run: pip install -e ".[dev,build]"
 
+      # ffmpeg genbruges mellem kørsler, så en udefrakommende nedetid hos
+      # udgiveren ikke kan blokere et release
+      - name: Cache ffmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: resources/ffmpeg.exe
+          key: ffmpeg-win64-v1
+
       - name: Hent ffmpeg (bundles i appen)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
-          $actual = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
-          Write-Host "ffmpeg SHA256: $actual"
-          # Verificér mod udgiverens egen checksum, så en beskadiget eller
-          # ombyttet download ikke havner i appen. Findes filen ikke, stopper
-          # vi ikke bygningen — men hashen står i loggen ovenfor.
-          try {
-            Invoke-WebRequest -Uri "$url.sha256" -OutFile ffmpeg.zip.sha256 -ErrorAction Stop
-          } catch {
-            Write-Warning "Kunne ikke hente $url.sha256 - springer verifikation over: $_"
-          }
-          if (Test-Path ffmpeg.zip.sha256) {
-            $expected = (Get-Content ffmpeg.zip.sha256 -Raw).Trim().Split()[0].ToLower()
-            if ($actual -ne $expected) {
-              throw "ffmpeg-checksum passer ikke: forventet $expected, fik $actual"
+          $gyan = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          $btbn = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+
+          function Get-WithRetry($url, $out) {
+            for ($i = 1; $i -le 3; $i++) {
+              try {
+                Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -TimeoutSec 180
+                return $true
+              } catch {
+                Write-Warning "Forsøg $i på $url mislykkedes: $_"
+                if ($i -lt 3) { Start-Sleep -Seconds (10 * $i) }
+              }
             }
-            Write-Host "ffmpeg-checksum verificeret OK"
+            return $false
           }
+
+          # Primær kilde, ellers GitHub-hostet reserve (samme vært som CI)
+          if (Get-WithRetry $gyan "ffmpeg.zip") {
+            $source = "gyan"
+          } elseif (Get-WithRetry $btbn "ffmpeg.zip") {
+            $source = "btbn"
+            Write-Warning "gyan.dev svarede ikke - brugte reservekilden BtbN"
+          } else {
+            throw "Kunne ikke hente ffmpeg fra nogen kilde"
+          }
+
+          $actual = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
+          Write-Host "ffmpeg SHA256 ($source): $actual"
+
+          # Verificér mod udgiverens egen checksum, når den findes. Mangler
+          # den, stopper vi ikke bygningen - hashen står i loggen ovenfor.
+          if ($source -eq "gyan") {
+            try {
+              Invoke-WebRequest -Uri "$gyan.sha256" -OutFile ffmpeg.zip.sha256 -UseBasicParsing -ErrorAction Stop
+            } catch {
+              Write-Warning "Kunne ikke hente checksum - springer verifikation over: $_"
+            }
+            if (Test-Path ffmpeg.zip.sha256) {
+              $expected = (Get-Content ffmpeg.zip.sha256 -Raw).Trim().Split()[0].ToLower()
+              if ($actual -ne $expected) {
+                throw "ffmpeg-checksum passer ikke: forventet $expected, fik $actual"
+              }
+              Write-Host "ffmpeg-checksum verificeret OK"
+            }
+          }
+
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
-          Copy-Item ffmpeg_tmp\*\bin\ffmpeg.exe resources\
+          # De to kilder pakker forskelligt - find exe'en hvor den nu ligger
+          $exe = Get-ChildItem ffmpeg_tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $exe) { throw "ffmpeg.exe blev ikke fundet i arkivet" }
+          Copy-Item $exe.FullName resources\
+
+      - name: Verificér ffmpeg
+        shell: pwsh
+        run: |
+          if (-not (Test-Path resources\ffmpeg.exe)) { throw "resources\ffmpeg.exe mangler" }
           resources\ffmpeg.exe -version | Select-Object -First 1
 
       - name: Kør tests
