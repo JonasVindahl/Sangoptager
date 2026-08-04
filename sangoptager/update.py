@@ -1,8 +1,14 @@
 """Selv-opdatering via GitHub Releases.
 
 Flow: tjek /releases/latest anonymt → hvis nyere version findes, download
-zippen, pak den ud i temp, og kør en updater-bat der venter på at appen
-lukker, spejler den nye mappe oven i installationen og genstarter appen.
+zippen, verificér dens checksum, pak den ud i temp, udskift installationen
+og start den nye version.
+
+Udskiftningen sker i appens EGEN proces. Tidligere blev det gjort af en
+bat-fil med robocopy, men den fejlede hver eneste gang hos brugeren, mens
+appens egen skrivetest i samme mappe lykkedes — mønstret for Windows'
+Kontrolleret mappeadgang, som blokerer fremmede processer i bl.a. Dokumenter.
+Filer i brug kan ikke overskrives, men de kan omdøbes, og det er nok.
 
 Kun aktiv i den frosne Windows-udgave (PyInstaller) — under udvikling gør
 modulet ingenting.
@@ -60,6 +66,100 @@ def install_dir() -> str:
 
 def can_self_update() -> bool:
     return sys.platform == "win32" and getattr(sys, "frozen", False)
+
+
+# Filer der er i brug kan ikke overskrives på Windows, men de kan godt
+# OMDØBES. Den gamle udgave flyttes derfor til side med dette suffiks og
+# ryddes op ved næste opstart.
+BACKUP_SUFFIX = ".gammel"
+
+
+def swap_in_new_version(new_dir: str, target_dir: str) -> int:
+    """Udskift filerne i target_dir med dem fra new_dir. Returnerer antal filer.
+
+    Gøres i appens EGEN proces frem for via robocopy i en bat-fil. Windows'
+    Kontrolleret mappeadgang beskytter bl.a. Dokumenter mod fremmede processer:
+    appen selv har lov at skrive dér, mens robocopy.exe bliver blokeret — og
+    det er netop det mønster, loggen viste (skrivetesten lykkedes, kopieringen
+    fejlede hver gang).
+
+    Filer i brug — exe'en og DLL'erne i _internal — omdøbes først til
+    BACKUP_SUFFIX, hvilket Windows tillader, hvorefter de nye kan skrives på
+    plads. Fejler noget undervejs, rulles alt tilbage, så installationen ikke
+    efterlades halvfærdig.
+    """
+    renamed: list[tuple[str, str]] = []   # (original, backup)
+    created: list[str] = []
+    count = 0
+    try:
+        for root, _dirs, files in os.walk(new_dir):
+            rel = os.path.relpath(root, new_dir)
+            dest_root = target_dir if rel == "." else os.path.join(target_dir, rel)
+            os.makedirs(dest_root, exist_ok=True)
+            for name in files:
+                src = os.path.join(root, name)
+                dst = os.path.join(dest_root, name)
+                if os.path.exists(dst):
+                    backup = _free_backup_path(dst)
+                    os.rename(dst, backup)
+                    renamed.append((dst, backup))
+                else:
+                    created.append(dst)
+                shutil.copy2(src, dst)
+                count += 1
+        return count
+    except OSError:
+        _roll_back(renamed, created)
+        raise
+
+
+def _free_backup_path(path: str) -> str:
+    """Ledig sti at flytte den gamle fil hen til."""
+    candidate = path + BACKUP_SUFFIX
+    n = 2
+    while os.path.exists(candidate):
+        try:
+            os.remove(candidate)          # rest fra en tidligere opdatering
+            return candidate
+        except OSError:
+            candidate = f"{path}{BACKUP_SUFFIX}{n}"
+            n += 1
+    return candidate
+
+
+def _roll_back(renamed: list[tuple[str, str]], created: list[str]) -> None:
+    """Sæt installationen tilbage, som den var, efter en fejlet udskiftning."""
+    for path in created:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    for original, backup in renamed:
+        try:
+            if os.path.exists(original):
+                os.remove(original)
+            os.rename(backup, original)
+        except OSError:
+            log.error("Kunne ikke gendanne %s fra %s", original, backup)
+    log.warning("Opdatering rullet tilbage — appen kører videre som før")
+
+
+def cleanup_old_versions(target_dir: str | None = None) -> int:
+    """Fjern efterladte .gammel-filer fra sidste opdatering. Kaldes ved opstart,
+    hvor de gamle filer ikke længere er i brug og derfor kan slettes."""
+    target = target_dir or install_dir()
+    removed = 0
+    for root, _dirs, files in os.walk(target):
+        for name in files:
+            if BACKUP_SUFFIX in name:
+                try:
+                    os.remove(os.path.join(root, name))
+                    removed += 1
+                except OSError:
+                    pass
+    if removed:
+        log.info("Ryddet %d fil(er) fra forrige version", removed)
+    return removed
 
 
 def install_dir_writable() -> bool:
@@ -172,86 +272,32 @@ def file_sha256(path: str) -> str:
     return digest.hexdigest()
 
 
-def build_updater_bat(new_dir: str, install_dir: str, pid: int,
-                      tmp_root: str, error_log: str) -> str:
-    """Indholdet af updater-scriptet: vent på appen, kopiér filer, genstart.
+def apply_update(new_dir: str) -> int:
+    """Udskift den kørende installation med den nye version og start den.
 
-    Ventetjekket matcher på exe-navnet (ikke PID-tallet, som ville substring-
-    matche fremmede PID'er). Kun appens egen _internal-mappe spejles med /MIR;
-    roden kopieres oveni, så filer brugeren selv har lagt i mappen aldrig
-    slettes. Fejler robocopy (exitkode >= 8), bevares temp-mappen, og den
-    gamle app genstartes.
+    Erstatter den tidligere bat-fil med robocopy. Den fejlede gang på gang
+    hos brugeren — appen kunne skrive i mappen, men den eksterne proces kunne
+    ikke, hvilket peger på Windows' Kontrolleret mappeadgang. Ved at gøre det
+    her i appens egen proces undgås både den blokering og batch-filens
+    faldgruber (manglende konsol, errorlevel i blokke, ventetid på PID).
 
-    Der ventes med `ping` i stedet for `timeout`: sidstnævnte kræver en konsol
-    og fejler øjeblikkeligt uden — hvilket gjorde vente-løkken til et CPU-spin.
-
-    Hvert skridt skrives til logfilen, også når det lykkes. Uden det er en
-    mislykket opdatering umulig at fejlsøge bagefter.
+    Returnerer antal udskiftede filer. Kaster OSError hvis det mislykkedes —
+    installationen er da rullet tilbage, og appen kan køre videre som før.
     """
-    # Bat'en kører altid på Windows — join med backslash uanset hvilken
-    # platform den blev skrevet på (testene kører også på macOS/Linux)
-    exe_path = install_dir.rstrip("\\/") + "\\" + EXE_NAME
-    # %errorlevel% gemmes i en variabel med det samme: echo nulstiller den,
-    # og inde i ()-blokke ville den blive udvidet allerede ved parsing
-    return f"""@echo off
-set "LOG={error_log}"
-echo. >> "%LOG%"
-echo [%date% %time%] Opdatering start -^> "{install_dir}" >> "%LOG%"
-
-:wait
-tasklist /FI "PID eq {pid}" 2>nul | find /I "{EXE_NAME}" >nul
-if not errorlevel 1 (
-    ping -n 2 127.0.0.1 >nul
-    goto wait
-)
-echo [%date% %time%] Appen er lukket - kopierer filer >> "%LOG%"
-
-robocopy "{new_dir}" "{install_dir}" /E /XD _internal /R:10 /W:1 >> "%LOG%" 2>&1
-set RC=%errorlevel%
-echo [%date% %time%] robocopy programmappe: exitkode %RC% >> "%LOG%"
-if %RC% geq 8 goto fejl
-
-if not exist "{new_dir}\\_internal" goto klar
-robocopy "{new_dir}\\_internal" "{install_dir}\\_internal" /MIR /R:10 /W:1 >> "%LOG%" 2>&1
-set RC=%errorlevel%
-echo [%date% %time%] robocopy _internal: exitkode %RC% >> "%LOG%"
-if %RC% geq 8 goto fejl
-
-:klar
-if not exist "{exe_path}" goto fejl
-echo [%date% %time%] Filer udskiftet - starter appen >> "%LOG%"
-start "" "{exe_path}"
-ping -n 3 127.0.0.1 >nul
-rmdir /s /q "{tmp_root}"
-exit /b
-
-:fejl
-echo [%date% %time%] FEJLEDE - temp beholdt: "{tmp_root}" >> "%LOG%"
-if exist "{exe_path}" start "" "{exe_path}"
-exit /b
-"""
-
-
-def launch_updater(new_dir: str, tmp_root: str) -> None:
-    """Starter updater-bat'en løsrevet fra appen — kald quit() lige efter."""
     target = install_dir()
-    error_log = os.path.join(_config_dir(), "opdatering_fejl.log")
-    bat_path = os.path.join(tmp_root, "opdater.bat")
-    with open(bat_path, "w", encoding="ascii", errors="replace") as fh:
-        fh.write(build_updater_bat(new_dir, target, os.getpid(),
-                                   tmp_root, error_log))
+    log.info("Udskifter installationen i %s", target)
+    count = swap_in_new_version(new_dir, target)
+    log.info("%d filer udskiftet", count)
+    return count
 
-    # KUN CREATE_NO_WINDOW: den giver en skjult konsol, så bat-kommandoerne
-    # virker. DETACHED_PROCESS gav slet ingen konsol, hvilket fik `timeout`
-    # til at fejle øjeblikkeligt. Processen overlever fint at appen lukker.
-    CREATE_NO_WINDOW = 0x08000000
-    subprocess.Popen(
-        ["cmd", "/c", bat_path],
-        creationflags=CREATE_NO_WINDOW,
-        close_fds=True,
-    )
-    log.info("Updater startet: %s → %s", new_dir, target)
 
+def launch_new_version() -> None:
+    """Start den nyudskiftede exe og lad denne proces afslutte bagefter."""
+    exe = os.path.join(install_dir(), EXE_NAME)
+    DETACHED = 0x00000008
+    subprocess.Popen([exe], creationflags=DETACHED, close_fds=True,
+                     cwd=install_dir())
+    log.info("Ny version startet: %s", exe)
 
 class UpdateCheckWorker(QThread):
     """Tjek for ny version.
@@ -285,7 +331,7 @@ class UpdateCheckWorker(QThread):
 
 
 class UpdateDownloadWorker(QThread):
-    """Downloader og udpakker den nye version. ready → kald launch_updater."""
+    """Downloader og udpakker den nye version. ready → kald apply_update."""
 
     progress = Signal(int)          # procent 0..100
     ready = Signal(str, str)        # (new_dir, tmp_root)

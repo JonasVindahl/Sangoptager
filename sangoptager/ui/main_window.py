@@ -51,10 +51,12 @@ from ..update import (
     UpdateCheckWorker,
     UpdateDownloadWorker,
     UpdateInfo,
+    apply_update,
     can_self_update,
+    cleanup_old_versions,
     install_dir,
     install_dir_writable,
-    launch_updater,
+    launch_new_version,
     mark_update_pending,
     take_pending_update,
     update_took_effect,
@@ -193,6 +195,8 @@ class MainWindow(QMainWindow):
         self._failed_update_tag: str | None = None
         self._check_previous_update()
         if can_self_update():
+            # De gamle filer er ikke længere i brug nu, hvor vi kører den nye
+            cleanup_old_versions()
             QTimer.singleShot(3000, self._check_updates)
 
     # ── UI ──────────────────────────────────────────────────────────────────
@@ -680,11 +684,21 @@ class MainWindow(QMainWindow):
         self._update_dl.start()
 
     def _apply_update(self, new_dir: str, tmp_root: str):
-        self.update_label.setText("Genstarter…")
+        self.update_label.setText("Installerer…")
         # Notér hvad vi forsøger, så næste opstart kan afsløre, om exe'en
         # rent faktisk blev udskiftet
         mark_update_pending(self._update_info.tag)
-        launch_updater(new_dir, tmp_root)
+        try:
+            apply_update(new_dir)
+        except OSError as exc:
+            # Installationen er rullet tilbage; appen kan køre videre
+            log.error("Kunne ikke udskifte installationen: %s", exc)
+            take_pending_update()          # ikke en fejlet opdatering at melde
+            self._show_manual_update_banner(self._update_info.tag)
+            self.status.showMessage("⚠ Opdatering mislykkedes — hent manuelt")
+            return
+        self.update_label.setText("Genstarter…")
+        launch_new_version()
         self.close()
 
     def _update_failed(self, message: str):

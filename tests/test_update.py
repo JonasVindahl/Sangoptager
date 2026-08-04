@@ -1,12 +1,6 @@
 import pytest
 
-from sangoptager.update import (
-    EXE_NAME,
-    build_updater_bat,
-    file_sha256,
-    is_newer,
-    parse_sha256,
-)
+from sangoptager.update import file_sha256, is_newer, parse_sha256
 
 
 @pytest.mark.parametrize("remote,current,expected", [
@@ -23,81 +17,102 @@ def test_is_newer(remote, current, expected):
     assert is_newer(remote, current) is expected
 
 
-def _bat(install_dir=r"C:\Sangoptager"):
-    return build_updater_bat(r"C:\Temp\ny", install_dir, 4242, r"C:\Temp\up",
-                             r"C:\Users\Far\AppData\Roaming\Sangoptager\fejl.log")
+# ── Udskiftning af installationen (i appens egen proces) ────────────────────
+
+def _fake_install(tmp_path, version="1.0"):
+    """Efterligner en PyInstaller-mappe: exe i roden, resten i _internal."""
+    root = tmp_path / "install"
+    (root / "_internal").mkdir(parents=True)
+    (root / "Sangoptager.exe").write_text(f"exe {version}")
+    (root / "_internal" / "qt.dll").write_text(f"dll {version}")
+    return root
 
 
-def test_updater_bat_contents():
-    bat = _bat()
-    assert "PID eq 4242" in bat
-    assert EXE_NAME in bat
-    assert 'rmdir /s /q "C:\\Temp\\up"' in bat
-    # Genstart skal ske FØR temp-mappen ryddes
-    assert bat.index("start") < bat.index("rmdir")
+def _fake_download(tmp_path, version="2.0"):
+    new = tmp_path / "ny"
+    (new / "_internal").mkdir(parents=True)
+    (new / "Sangoptager.exe").write_text(f"exe {version}")
+    (new / "_internal" / "qt.dll").write_text(f"dll {version}")
+    return new
 
 
-def test_updater_waits_on_exe_name_not_pid_substring():
-    """find på PID-tallet ville også matche PID 42421 — der skal matches
-    på exe-navnet, som tasklist viser i samme linje."""
-    bat = _bat()
-    assert f'find /I "{EXE_NAME}"' in bat
-    assert 'find "4242"' not in bat
+def test_swap_replaces_files_and_keeps_old_aside(tmp_path):
+    from sangoptager.update import BACKUP_SUFFIX, swap_in_new_version
+
+    install = _fake_install(tmp_path)
+    new = _fake_download(tmp_path)
+
+    assert swap_in_new_version(str(new), str(install)) == 2
+    assert (install / "Sangoptager.exe").read_text() == "exe 2.0"
+    assert (install / "_internal" / "qt.dll").read_text() == "dll 2.0"
+    # De gamle er flyttet til side, ikke overskrevet — det er dét, der gør at
+    # filer i brug kan udskiftes på Windows
+    assert (install / ("Sangoptager.exe" + BACKUP_SUFFIX)).read_text() == "exe 1.0"
 
 
-def test_updater_mirrors_only_internal_dir():
-    """/MIR sletter alt der ikke er i kilden — det må kun ramme appens egen
-    _internal-mappe, aldrig hele installationsmappen med brugerens filer."""
-    bat = _bat()
-    mir_lines = [ln for ln in bat.splitlines() if "/MIR" in ln]
-    assert len(mir_lines) == 1
-    assert "_internal" in mir_lines[0]
-    # Roden kopieres additivt og springer _internal over
-    assert 'robocopy "C:\\Temp\\ny" "C:\\Sangoptager" /E /XD _internal' in bat
+def test_swap_keeps_users_own_files(tmp_path):
+    """Den gamle robocopy /MIR slettede alt, der ikke var i kilden."""
+    from sangoptager.update import swap_in_new_version
+
+    install = _fake_install(tmp_path)
+    (install / "mine noter.txt").write_text("vigtigt")
+    swap_in_new_version(str(_fake_download(tmp_path)), str(install))
+    assert (install / "mine noter.txt").read_text() == "vigtigt"
 
 
-def test_updater_falls_back_to_old_app_on_failure():
-    bat = _bat()
-    assert "if %RC% geq 8 goto fejl" in bat
-    fejl = bat[bat.index(":fejl"):]
-    assert "start" in fejl          # den gamle app startes igen
-    assert "rmdir" not in fejl      # temp bevares til fejlsøgning
+def test_swap_rolls_back_when_a_file_cannot_be_written(tmp_path, monkeypatch):
+    """Halvfærdig installation er værre end ingen opdatering."""
+    import shutil as _shutil
+
+    from sangoptager.update import swap_in_new_version
+
+    install = _fake_install(tmp_path)
+    new = _fake_download(tmp_path)
+
+    ægte_copy = _shutil.copy2
+    kald = {"n": 0}
+
+    def fejler_på_anden_fil(src, dst, *a, **kw):
+        kald["n"] += 1
+        if kald["n"] == 2:
+            raise OSError("adgang nægtet")
+        return ægte_copy(src, dst, *a, **kw)
+
+    monkeypatch.setattr("sangoptager.update.shutil.copy2", fejler_på_anden_fil)
+    with pytest.raises(OSError):
+        swap_in_new_version(str(new), str(install))
+
+    # Alt skal være som før forsøget
+    assert (install / "Sangoptager.exe").read_text() == "exe 1.0"
+    assert (install / "_internal" / "qt.dll").read_text() == "dll 1.0"
 
 
-def test_updater_waits_without_needing_a_console():
-    """`timeout` kræver en konsol og fejler øjeblikkeligt uden — så bliver
-    vente-løkken et CPU-spin. `ping` virker uanset."""
-    bat = _bat()
-    assert "timeout" not in bat
-    assert "ping -n 2 127.0.0.1" in bat
+def test_cleanup_removes_leftovers_from_previous_update(tmp_path):
+    from sangoptager.update import (
+        BACKUP_SUFFIX,
+        cleanup_old_versions,
+        swap_in_new_version,
+    )
+
+    install = _fake_install(tmp_path)
+    swap_in_new_version(str(_fake_download(tmp_path)), str(install))
+    assert (install / ("Sangoptager.exe" + BACKUP_SUFFIX)).exists()
+
+    assert cleanup_old_versions(str(install)) == 2
+    assert not (install / ("Sangoptager.exe" + BACKUP_SUFFIX)).exists()
+    # De nye filer må naturligvis ikke røres
+    assert (install / "Sangoptager.exe").read_text() == "exe 2.0"
 
 
-def test_updater_logs_every_step():
-    """En mislykket opdatering skal kunne fejlsøges bagefter, så robocopys
-    exitkode og output skal i logfilen — også når det lykkes."""
-    bat = _bat()
-    assert bat.count('>> "%LOG%"') >= 5
-    assert 'robocopy' in bat and '>> "%LOG%" 2>&1' in bat
-    assert "exitkode %RC%" in bat
-    # errorlevel skal gemmes FØR echo, som ellers nulstiller den
-    rod = bat[bat.index("robocopy"):]
-    assert rod.index("set RC=%errorlevel%") < rod.index("echo [%date%")
+def test_swap_survives_a_leftover_backup(tmp_path):
+    """Kunne den gamle sikkerhedskopi ikke slettes sidst, må opdateringen
+    ikke gå i stå på den."""
+    from sangoptager.update import BACKUP_SUFFIX, swap_in_new_version
 
-
-def test_updater_avoids_errorlevel_inside_blocks():
-    """%errorlevel% i en ()-blok udvides ved parsing og ville være forældet.
-    Derfor må _internal-grenen ikke ligge i en blok."""
-    bat = _bat()
-    assert "if not exist" in bat and "goto klar" in bat
-    assert "if errorlevel 8 goto fejl\n)" not in bat
-
-
-def test_updater_targets_actual_install_dir():
-    """Appen kan ligge hvor som helst — bat'en skal pege på den mappe, den
-    faktisk kører fra, så genvejen på skrivebordet stadig virker bagefter."""
-    bat = _bat(install_dir=r"D:\Programmer\Sangoptager")
-    assert f'start "" "D:\\Programmer\\Sangoptager\\{EXE_NAME}"' in bat
-    assert "C:\\Sangoptager" not in bat
+    install = _fake_install(tmp_path)
+    (install / ("Sangoptager.exe" + BACKUP_SUFFIX)).write_text("gammel rest")
+    swap_in_new_version(str(_fake_download(tmp_path)), str(install))
+    assert (install / "Sangoptager.exe").read_text() == "exe 2.0"
 
 
 @pytest.mark.parametrize("text,expected", [

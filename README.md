@@ -75,10 +75,14 @@ bagefter og bliver ved med at virke, uanset hvor mappen ligger. Kun appens
 egen `_internal\`-mappe spejles (`/MIR`); selve programmappen kopieres
 additivt, så filer man selv har lagt der ikke slettes. Kan mappen ikke skrives
 (fx `C:\Program Files`), siger banneret det i stedet for at hente forgæves.
-Går noget galt undervejs, startes den gamle version igen. Hele forløbet —
-robocopys output og exitkoder, også når det lykkes — skrives til
-`%APPDATA%\Sangoptager\opdatering_fejl.log`, så en mislykket opdatering kan
-fejlsøges bagefter i stedet for at være en gætteleg.
+Selve udskiftningen sker i **appens egen proces**. Tidligere klarede en
+bat-fil det med robocopy, men den fejlede hver eneste gang hos brugeren,
+selvom appens egen skrivetest i samme mappe lykkedes — netop mønstret for
+Windows' Kontrolleret mappeadgang, der beskytter bl.a. Dokumenter mod
+fremmede processer. Filer i brug kan ikke overskrives, men de kan omdøbes:
+den gamle udgave flyttes til `.gammel` og ryddes ved næste opstart. Fejler
+noget undervejs, rulles alt tilbage, så installationen aldrig efterlades
+halvfærdig, og appen kører videre som før.
 
 Indstillinger (⚙): valg af **mikrofon** og **melodikilde** (hvilken højttaler
 melodien afspilles på), sync-mappe, kunstnernavn og manuelt opdaterings-tjek. Gemmes i
