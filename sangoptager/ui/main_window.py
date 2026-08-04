@@ -34,7 +34,7 @@ from ..audio.capture import (
     DualRecorder,
     RecordingResult,
 )
-from ..audio.mixdown import OFFSET_MAX_MS, MixdownError, mixdown
+from ..audio.mixdown import MixdownError, mixdown
 from ..library import (
     album_folder,
     build_filename,
@@ -87,8 +87,7 @@ class SaveWorker(QThread):
 
             tmp_mp3 = os.path.join(temp_recording_dir(), "mix.mp3")
             mixdown(self._result.mic_path, self._result.loop_path,
-                    tmp_mp3, self._balance, self._settings.normalize,
-                    self._result.start_offset_ms)
+                    tmp_mp3, self._balance, self._settings.normalize)
 
             dest = unique_path(
                 os.path.join(dest_dir, build_filename(self._title, now)))
@@ -103,15 +102,13 @@ class SaveWorker(QThread):
                 now.strftime("%Y-%m-%d_%H-%M-%S_") + self._title,
                 dict(titel=self._title, destination=dest,
                      balance=self._balance, normalize=self._settings.normalize,
-                     start_offset_ms=self._result.start_offset_ms,
-                     length_diff_ms=self._result.length_diff_ms,
+                     lead_silence_ms=self._result.loop_lead_silence_ms,
                      overflows=self._result.overflows),
             )
             _cleanup_temp()
-            log.info("Gemt '%s' → %s (balance=%.2f, normalize=%s, "
-                     "startforskydning=%s ms)",
+            log.info("Gemt '%s' → %s (balance=%.2f, normalize=%s)",
                      self._title, dest, self._balance,
-                     self._settings.normalize, self._result.start_offset_ms)
+                     self._settings.normalize)
             self.done.emit(f"✓ Gemt — {total} sange i {album}")
         except (MixdownError, OSError) as exc:
             log.error("Gem fejlede for '%s': %s", self._title, exc)
@@ -502,29 +499,20 @@ class MainWindow(QMainWindow):
         self.status.showMessage("Optagelse stoppet")
         p = self.pending
         log.info("Optagelse stoppet: %.1f sek, peak stemme=%s melodi=%s, "
-                 "startforskydning=%s ms, længdeforskel=%s ms, overflows=%d, "
-                 "sporlængder=%s/%s sek",
+                 "overflows=%d, sporlængder=%s/%s sek",
                  p.duration, p.mic_peak, p.loop_peak,
-                 None if p.start_offset_ms is None
-                 else round(p.start_offset_ms, 1),
-                 None if p.length_diff_ms is None
-                 else round(p.length_diff_ms, 1),
                  p.overflows, p.mic_seconds, p.loop_seconds)
-        if p.start_offset_ms is not None and abs(p.start_offset_ms) >= 40:
-            later = "melodien" if p.start_offset_ms > 0 else "mikrofonen"
-            if abs(p.start_offset_ms) <= OFFSET_MAX_MS:
-                log.info("%s begyndte %.0f ms senere — kompenseres i mixet",
-                         later.capitalize(), abs(p.start_offset_ms))
-            else:
-                log.warning("%s begyndte %.0f ms senere — uden for det "
-                            "kompenserbare interval, mixet rettes IKKE",
-                            later.capitalize(), abs(p.start_offset_ms))
-        # Afviger de to mål meget, er musikken sandsynligvis stoppet før der
-        # blev trykket Stop — værd at vide, hvis noget alligevel lyder skævt
-        if p.start_offset_ms is not None and p.length_diff_ms is not None \
-                and abs(p.length_diff_ms - p.start_offset_ms) > 500:
-            log.info("Melodien holdt op ca. %.0f ms før der blev trykket Stop",
-                     p.length_diff_ms - p.start_offset_ms)
+        if p.loop_lead_silence_ms:
+            log.info("Melodien begyndte at spille %.1f sek inde i optagelsen "
+                     "— hullet er fyldt med stilhed, så sporene er synkrone",
+                     p.loop_lead_silence_ms / 1000)
+        # Sporene skal nu dække samme tidsrum. Gør de ikke det, holdt melodien
+        # op før der blev trykket Stop — værd at vide, hvis noget lyder skævt
+        if p.mic_seconds and p.loop_seconds \
+                and abs(p.mic_seconds - p.loop_seconds) > 0.25:
+            log.warning("Sporlængder afviger %.0f ms trods udfyldning — "
+                        "melodien stoppede formentlig før der blev trykket Stop",
+                        abs(p.mic_seconds - p.loop_seconds) * 1000)
         self._resolve_pending()
 
     def _resolve_pending(self):

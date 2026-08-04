@@ -31,21 +31,18 @@ midt i det hele, siger statuslinjen til med det samme. Appen kan kun køre i
 én instans — endnu et dobbeltklik fronter bare det åbne vindue.
 Fejlsøgning: `%APPDATA%\Sangoptager\app.log`.
 
-**Synkronisering:** WASAPI-loopback leverer først data, når der faktisk
-afspilles lyd på enheden. Melodisporets første sample er derfor det øjeblik,
-musikken begyndte — ikke det øjeblik der blev trykket Optag. Trykker man
-Optag og starter først sangen et sekund senere, mangler melodisporet det
-sekund, og musikken ville ligge et helt sekund forud for stemmen.
+**Synkronisering:** Begge spor begynder præcis dér, hvor der blev trykket
+Optag. Det kræver et modtræk, fordi WASAPI-loopback ikke leverer data, før
+der faktisk afspilles lyd: uden det ville melodisporets første sample være
+det øjeblik, musikken startede, og sporet ville ligge for tidligt. Optagelsen
+fylder derfor selv stilhed i hullet fra optagestart til første lyd, så de to
+WAV-filer dækker samme tidsrum og kan lægges råt oven på hinanden.
 
-Forskydningen måles på, hvornår hvert spors **første lyddata** ankom, aflæst
-med `time.monotonic()` i begge callbacks — samme ur, så tallene er
-sammenlignelige — og melodien forsinkes tilsvarende i mixet. Kompensation
-sker kun mellem 20 ms og 3 s; derudenfor logges det i stedet.
-
-To målemetoder er bevidst *fravalgt*: PortAudios ADC-tidsstempler (brugt
-v1.3.0–v1.6.0) har ikke fælles nulpunkt mellem to streams, og forskellen på
-sporlængder (v1.9.0) indeholder også pausen fra musikken stopper til der
-trykkes Stop. Længdeforskellen logges stadig som krydstjek. Disk-skrivning sker i en
+Mixet forskyder aldrig noget. Tre tidligere forsøg på at rette timingen dér
+gjorde det kun værre — ADC-tidsstempler uden fælles nulpunkt (v1.3.0–v1.6.0),
+sporlængde-differencen (v1.9.0, som også indeholdt pausen efter musikken
+stoppede) og en målt forskydning med for lavt loft (v1.10.0). Problemet hørte
+hjemme i optagelsen. Disk-skrivning sker i en
 separat tråd, og tabte buffere (overbelastet PC) udløser en advarsel i
 gem-dialogen. De rå spor arkiveres desuden i
 `%APPDATA%\Sangoptager\raa_spor\` (seneste 10 optagelser / 14 dage), så en

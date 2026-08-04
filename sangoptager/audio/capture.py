@@ -77,23 +77,50 @@ class _WavWriter:
         self.write_failed = False           # disk-skrivning er brudt sammen
         self._tail_silence_bytes = 0        # bytes siden sidste hørbare buffer
         self.first_ts: float | None = None  # tid for første buffer
+        self._start_ts: float | None = None  # nulpunkt: da der blev trykket Optag
+        self._lead_silence_bytes = 0        # stilhed der skal fylde hullet ud
+        self.lead_silence_seconds = 0.0     # samme, til log
         threading.Thread(target=self._drain, daemon=True,
                          name="wav-writer").start()
 
-    def mark_first_buffer(self):
-        """Kaldes fra callbacken ved første buffer.
+    def begin(self, start_ts: float):
+        """Sæt optagelsens nulpunkt — tidspunktet hvor der blev trykket Optag.
 
-        Der bruges ALTID time.monotonic(). PortAudios ADC-tidsstempler gælder
-        kun inden for én stream og kan ikke sammenlignes på tværs — det var
-        netop den fejl, der skævvred mixet i v1.3.0–v1.6.0. monotonic er
-        derimod procesbred, så de to spors tidsstempler er sammenlignelige.
+        Sporet fyldes med stilhed fra dette tidspunkt og frem til den første
+        rigtige lyddata. Det er nødvendigt, fordi WASAPI-loopback ikke
+        leverer noget, før der faktisk afspilles lyd: uden udfyldning ville
+        melodisporets første sample være det øjeblik, musikken startede, og
+        sporet ville ligge for tidligt i forhold til mikrofonen.
         """
+        self._start_ts = start_ts
+
+    def _measure_lead_silence(self, first_chunk_bytes: int) -> int:
+        """Bytes stilhed der mangler foran første buffer. Ingen allokering
+        her — vi er i lyd-callbacken; selve nullerne skrives af writer-tråden."""
+        if self._start_ts is None:
+            return 0
+        per_sec = 2 * self._channels * self._rate
+        # Bufferen indeholder lyd fra tiden FØR callbacken, så dens egen
+        # varighed skal ikke tælles med i hullet
+        gap = (time.monotonic() - self._start_ts) - first_chunk_bytes / per_sec
+        if gap <= 0:
+            return 0
+        n = int(gap * per_sec)
+        return n - n % (2 * self._channels)   # hele frames
+
+    def mark_first_buffer(self):
+        """Kaldes fra callbacken ved første buffer. Bruger altid
+        time.monotonic(), som er procesbred og derfor fælles for begge spor."""
         if self.first_ts is None:
             self.first_ts = time.monotonic()
 
     def write(self, data: bytes):
         """Fra audio-callbacken: kø + niveauer, ingen disk-I/O."""
         if not self.write_failed:
+            if self.bytes_written == 0 and not self._queue:
+                self._lead_silence_bytes = self._measure_lead_silence(len(data))
+                self.lead_silence_seconds = self._lead_silence_bytes / (
+                    2 * self._channels * self._rate)
             self._queue.append(data)
             self._wakeup.set()
         raw = _rms_level(data)
@@ -109,6 +136,8 @@ class _WavWriter:
             while True:
                 self._wakeup.wait(0.2)
                 self._wakeup.clear()
+                if self._lead_silence_bytes:
+                    self._write_lead_silence()
                 while self._queue:
                     chunk = self._queue.popleft()
                     self._wf.writeframes(chunk)
@@ -129,6 +158,18 @@ class _WavWriter:
                 pass
             self._closed.set()
 
+    def _write_lead_silence(self):
+        """Fyld hullet fra optagestart til første lyddata. Skrives i portioner,
+        så en lang pause ikke kræver én kæmpe buffer i hukommelsen."""
+        remaining = self._lead_silence_bytes
+        self._lead_silence_bytes = 0
+        block = bytes(65536)
+        while remaining > 0:
+            size = min(len(block), remaining)
+            self._wf.writeframes(block[:size])
+            self.bytes_written += size
+            remaining -= size
+
     @property
     def seconds_written(self) -> float:
         return self.bytes_written / (2 * self._channels * self._rate)
@@ -146,33 +187,17 @@ class _WavWriter:
         self._closed.wait(timeout=15)
 
 
-def compute_start_offset_ms(mic_first_ts: float | None,
-                            loop_first_ts: float | None) -> float | None:
-    """Startforskydning i ms (positiv = melodisporet begyndte senest).
+def lead_silence_ms(seconds: float | None) -> float | None:
+    """Udfyldt stilhed foran et spor i ms — kun til logning.
 
-    Måles på hvornår hvert spors FØRSTE lyddata ankom, aflæst med den
-    procesbrede time.monotonic() i begge callbacks — altså samme ur.
-
-    Det er nødvendigt, fordi WASAPI-loopback ikke leverer data, før der
-    faktisk afspilles lyd på enheden: melodisporets første sample er det
-    øjeblik musikken startede, ikke det øjeblik der blev trykket Optag.
-    Forskellen skal derfor lægges tilbage i mixet.
-
-    Sporlængder duer ikke til denne måling: stopper musikken før der trykkes
-    Stop, holder loopbacken også op med at levere data, og længdeforskellen
-    ville så indeholde både start- OG slutpausen.
+    Melodisporet får udfyldt hullet fra optagestart til musikken faktisk
+    begyndte at spille, fordi WASAPI-loopback ikke leverer data imens. Tallet
+    er altså 'hvor længe der gik, før musikken kom i gang' — nyttigt at kunne
+    se i loggen, men sporene er allerede synkrone, så der er intet at rette.
     """
-    if mic_first_ts is None or loop_first_ts is None:
+    if seconds is None:
         return None
-    return (loop_first_ts - mic_first_ts) * 1000.0
-
-
-def length_diff_ms(mic_seconds: float | None,
-                   loop_seconds: float | None) -> float | None:
-    """Forskel på sporlængder i ms — kun til logning og krydstjek."""
-    if mic_seconds is None or loop_seconds is None:
-        return None
-    return (mic_seconds - loop_seconds) * 1000.0
+    return seconds * 1000.0
 
 
 class RecordingResult:
@@ -183,17 +208,17 @@ class RecordingResult:
                  loop_seconds: float | None = None,
                  disk_failed: bool = False,
                  loop_tail_silence: float | None = None,
-                 start_offset_ms: float | None = None,
-                 length_diff_ms: float | None = None):
+                 mic_lead_silence_ms: float | None = None,
+                 loop_lead_silence_ms: float | None = None):
         self.mic_path = mic_path
         self.loop_path = loop_path
         self.duration = duration
         # Højeste RMS pr. spor; None = ukendt (fx gendannet efter crash)
         self.mic_peak = mic_peak
         self.loop_peak = loop_peak
-        # Målt startforskydning (positiv = melodien begyndte senest) —
-        # DEN kompenseres i mixet
-        self.start_offset_ms = start_offset_ms
+        # Udfyldt stilhed foran hvert spor — kun til log; sporene er synkrone
+        self.mic_lead_silence_ms = mic_lead_silence_ms
+        self.loop_lead_silence_ms = loop_lead_silence_ms
         self.overflows = overflows
         self.mic_seconds = mic_seconds
         self.loop_seconds = loop_seconds
@@ -201,8 +226,6 @@ class RecordingResult:
         self.disk_failed = disk_failed
         # Sekunder melodisporet var stille op til stop; None = ukendt
         self.loop_tail_silence = loop_tail_silence
-        # Forskel på sporlængder — kun til logning/krydstjek, ikke til mixet
-        self.length_diff_ms = length_diff_ms
 
 
 class CaptureError(RuntimeError):
@@ -212,32 +235,30 @@ class CaptureError(RuntimeError):
 def _collect_stats(mic_writer: _WavWriter | None, loop_writer: _WavWriter | None,
                    mic_path: str | None, loop_path: str | None) -> dict:
     """Samler stop()-statistik fra writerne til RecordingResult-felter."""
-    start_offset_ms = None
     overflows = 0
     disk_failed = False
     mic_peak = loop_peak = mic_seconds = loop_seconds = None
     loop_tail_silence = None
+    mic_lead = loop_lead = None
     if mic_writer is not None:
         mic_peak = mic_writer.max_level
         mic_seconds = mic_writer.seconds_written
         overflows += mic_writer.overflows
         disk_failed = disk_failed or mic_writer.write_failed
+        mic_lead = lead_silence_ms(mic_writer.lead_silence_seconds)
     if loop_writer is not None:
         loop_peak = loop_writer.max_level
         loop_seconds = loop_writer.seconds_written
         overflows += loop_writer.overflows
         disk_failed = disk_failed or loop_writer.write_failed
         loop_tail_silence = loop_writer.tail_silence_seconds
-    if mic_writer is not None and loop_writer is not None:
-        start_offset_ms = compute_start_offset_ms(
-            mic_writer.first_ts, loop_writer.first_ts)
+        loop_lead = lead_silence_ms(loop_writer.lead_silence_seconds)
     return dict(mic_path=mic_path, loop_path=loop_path,
                 mic_peak=mic_peak, loop_peak=loop_peak,
                 overflows=overflows,
                 mic_seconds=mic_seconds, loop_seconds=loop_seconds,
                 disk_failed=disk_failed, loop_tail_silence=loop_tail_silence,
-                start_offset_ms=start_offset_ms,
-                length_diff_ms=length_diff_ms(mic_seconds, loop_seconds))
+                mic_lead_silence_ms=mic_lead, loop_lead_silence_ms=loop_lead)
 
 
 class DualRecorder:
@@ -452,10 +473,13 @@ class _WindowsBackend:
             self._writers.append(self._loop_writer)
             self._open_stream(self._loop_info, self._loop_writer, loop_ch, loop_rate)
 
-        # Begge enheder er nu klar — sæt dem i gang lige efter hinanden.
-        # Tidligere startede mikrofonen ved åbning, mens loopback-enheden
-        # stadig blev initialiseret, hvilket kostede op mod et sekunds
-        # forskydning mellem sporene.
+        # Begge enheder er klar — ét fælles nulpunkt, og så i gang.
+        # Sporene fylder selv stilhed i, hvis de først leverer data senere
+        # (WASAPI-loopback tier, indtil der faktisk afspilles lyd), så begge
+        # WAV-filer starter præcis dér, hvor der blev trykket Optag.
+        start_ts = time.monotonic()
+        for writer in self._writers:
+            writer.begin(start_ts)
         for stream in self._streams:
             stream.start_stream()
 
@@ -567,6 +591,7 @@ class _DevBackend:
             blocksize=_FRAMES_PER_BUFFER,
             callback=callback,
         )
+        writer.begin(time.monotonic())
         self._stream.start()
 
     def stop(self):

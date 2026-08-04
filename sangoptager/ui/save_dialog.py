@@ -52,8 +52,7 @@ class _PreviewWorker(QThread):
         try:
             path = os.path.join(temp_recording_dir(), "preview.mp3")
             mixdown(self._result.mic_path, self._result.loop_path, path,
-                    self._balance, self._normalize,
-                    self._result.start_offset_ms)
+                    self._balance, self._normalize)
             self.done.emit(path)
         except MixdownError as exc:
             self.failed.emit(str(exc))

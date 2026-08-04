@@ -61,45 +61,27 @@ def balance_gains(balance: float) -> tuple[float, float]:
 _LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"
 
 
-# Kompensér kun startforskydninger i dette interval. Under 20 ms er uhørligt,
-# og over 3 s er mere sandsynligt en fejlmåling end en ægte forsinket start.
-OFFSET_MIN_MS = 20.0
-OFFSET_MAX_MS = 3000.0
-
-
 def build_filter(mic_gain: float, loop_gain: float, normalize: bool,
-                 two_inputs: bool = True,
-                 start_offset_ms: float | None = None) -> str:
-    """ffmpeg-filterkæden: balance, startforskydning, sum og limiter/normalisering.
+                 two_inputs: bool = True) -> str:
+    """ffmpeg-filterkæden: balance, sum og afsluttende limiter/normalisering.
 
-    start_offset_ms måles på, hvornår hvert spors første lyddata ankom (se
-    compute_start_offset_ms). Den er positiv, når melodisporet begyndte
-    senest — WASAPI-loopback optager nemlig først, når der faktisk spiller
-    lyd — og melodien skal da forsinkes tilsvarende for at ligge rigtigt.
-    Negativ værdi betyder det omvendte.
+    Sporene lægges oven på hinanden præcis som optaget — der forskydes ALDRIG
+    i tid. Det er ikke nødvendigt: begge WAV-filer starter i samme øjeblik,
+    der blev trykket Optag, fordi optagelsen selv fylder stilhed i, mens
+    WASAPI-loopbacken endnu ikke leverer data (se _WavWriter.begin).
 
-    Bemærk: hverken PortAudios ADC-tidsstempler eller forskellen på
-    sporlængder må bruges her. De første har ikke fælles nulpunkt (det
-    skævvred mixet i v1.3.0–v1.6.0); den anden indeholder også pausen fra
-    musikken stopper til der trykkes Stop.
+    Tidligere forsøg på at kompensere i mixet gjorde det kun værre — først
+    med ADC-tidsstempler uden fælles nulpunkt (v1.3.0-v1.6.0), siden ud fra
+    sporlængder (v1.9.0) og målt startforskydning (v1.10.0). Problemet hørte
+    hjemme i optagelsen, ikke i mixet.
     """
     finisher = _LOUDNORM if normalize else "alimiter=limit=0.97"
     if not two_inputs:
         return finisher
 
-    mic_chain = f"volume={mic_gain:.4f}"
-    mel_chain = f"volume={loop_gain:.4f}"
-    if start_offset_ms is not None \
-            and OFFSET_MIN_MS <= abs(start_offset_ms) <= OFFSET_MAX_MS:
-        delay = f"adelay={round(abs(start_offset_ms))}:all=1"
-        if start_offset_ms > 0:
-            mel_chain += "," + delay   # melodien startede senest
-        else:
-            mic_chain += "," + delay   # mikrofonen startede senest
-
     return (
-        f"[0:a]{mic_chain}[voc];"
-        f"[1:a]{mel_chain}[mel];"
+        f"[0:a]volume={mic_gain:.4f}[voc];"
+        f"[1:a]volume={loop_gain:.4f}[mel];"
         "[voc][mel]amix=inputs=2:duration=longest:normalize=0,"
         + finisher
     )
@@ -111,14 +93,13 @@ def mixdown(
     out_mp3: str,
     balance: float = 0.5,
     normalize: bool = True,
-    start_offset_ms: float | None = None,
 ) -> str:
     """Mix (eller konvertér et enkelt spor) til MP3. Returnerer stien.
 
     normalize=True kører EBU R128 loudness-normalisering, så alle sange
-    ender med samme oplevede lydstyrke. start_offset_ms (fra RecordingResult)
-    retter den målte startforskydning mellem sporene. WAV-filerne røres ikke
-    — kald selv cleanup bagefter, når MP3'en er verificeret.
+    ender med samme oplevede lydstyrke. Sporene tidsforskydes ikke — de er
+    allerede synkrone fra optagelsen. WAV-filerne røres ikke — kald selv
+    cleanup bagefter, når MP3'en er verificeret.
     """
     inputs = [p for p in (mic_wav, loop_wav) if p and os.path.isfile(p)]
     if not inputs:
@@ -132,8 +113,7 @@ def mixdown(
         cmd += ["-i", path]
 
     filt = build_filter(mic_gain, loop_gain, normalize,
-                        two_inputs=len(inputs) == 2,
-                        start_offset_ms=start_offset_ms)
+                        two_inputs=len(inputs) == 2)
 
     cmd += [
         "-filter_complex", filt,
