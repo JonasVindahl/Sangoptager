@@ -36,6 +36,12 @@ SILENCE_PEAK = 0.02
 # (ca. -40 dB — lavere end SILENCE_PEAK, så musikkens svage passager ikke
 # tæller med som "melodien er væk")
 TAIL_SILENCE_RMS = 0.01
+# Mindste hul der fyldes med stilhed. Konservativt med vilje: leveres buffere
+# i et lille bundt efter en planlægnings-forsinkelse, ser den første ud som om
+# der mangler tid. Ægte huller (pause i videoen, buffering, reklame) er typisk
+# over et sekund. At misse en forskydning på under et halvt sekund er langt at
+# foretrække frem for at indsætte stilhed, der ikke var der.
+GAP_FILL_MIN_S = 0.5
 
 
 def _rms_level(pcm16: bytes) -> float:
@@ -78,8 +84,9 @@ class _WavWriter:
         self._tail_silence_bytes = 0        # bytes siden sidste hørbare buffer
         self.first_ts: float | None = None  # tid for første buffer
         self._start_ts: float | None = None  # nulpunkt: da der blev trykket Optag
-        self._lead_silence_bytes = 0        # stilhed der skal fylde hullet ud
-        self.lead_silence_seconds = 0.0     # samme, til log
+        self._accepted = 0                  # bytes lagt i kø (lyd + stilhed)
+        self.filled_gaps = 0                # antal huller vi har fyldt ud
+        self.filled_seconds = 0.0           # samlet udfyldt tid, til log
         threading.Thread(target=self._drain, daemon=True,
                          name="wav-writer").start()
 
@@ -94,19 +101,26 @@ class _WavWriter:
         """
         self._start_ts = start_ts
 
-    def _measure_lead_silence(self, first_chunk_bytes: int) -> int:
-        """Bytes stilhed der mangler foran første buffer. Ingen allokering
-        her — vi er i lyd-callbacken; selve nullerne skrives af writer-tråden."""
+    def _missing_bytes(self, incoming: int) -> int:
+        """Hvor mange bytes stilhed mangler, for at sporet passer med uret?
+
+        Kaldes ved HVER buffer, ikke kun den første: WASAPI-loopback holder op
+        med at levere data, hver gang der ikke afspilles lyd — også midt i en
+        sang, hvis videoen sættes på pause eller hakker. Uden det her ville de
+        sekunder mangle i filen, og alt derefter ligge for tidligt.
+
+        Ingen allokering her — vi er i lyd-callbacken; nullerne skrives af
+        writer-tråden.
+        """
         if self._start_ts is None:
             return 0
         per_sec = 2 * self._channels * self._rate
-        # Bufferen indeholder lyd fra tiden FØR callbacken, så dens egen
-        # varighed skal ikke tælles med i hullet
-        gap = (time.monotonic() - self._start_ts) - first_chunk_bytes / per_sec
-        if gap <= 0:
-            return 0
-        n = int(gap * per_sec)
-        return n - n % (2 * self._channels)   # hele frames
+        # Bufferen dækker selv tiden umiddelbart før callbacken
+        expected = int((time.monotonic() - self._start_ts) * per_sec) - incoming
+        missing = expected - self._accepted
+        if missing < GAP_FILL_MIN_S * per_sec:
+            return 0                          # jitter, ikke et ægte hul
+        return missing - missing % (2 * self._channels)   # hele frames
 
     def mark_first_buffer(self):
         """Kaldes fra callbacken ved første buffer. Bruger altid
@@ -117,11 +131,16 @@ class _WavWriter:
     def write(self, data: bytes):
         """Fra audio-callbacken: kø + niveauer, ingen disk-I/O."""
         if not self.write_failed:
-            if self.bytes_written == 0 and not self._queue:
-                self._lead_silence_bytes = self._measure_lead_silence(len(data))
-                self.lead_silence_seconds = self._lead_silence_bytes / (
-                    2 * self._channels * self._rate)
+            missing = self._missing_bytes(len(data))
+            if missing:
+                # int i køen = stilhed; rækkefølgen i forhold til lyden
+                # bevares automatisk, fordi de deler kø
+                self._queue.append(missing)
+                self._accepted += missing
+                self.filled_gaps += 1
+                self.filled_seconds += missing / (2 * self._channels * self._rate)
             self._queue.append(data)
+            self._accepted += len(data)
             self._wakeup.set()
         raw = _rms_level(data)
         self.level = max(raw, self.level * _METER_DECAY)
@@ -136,12 +155,13 @@ class _WavWriter:
             while True:
                 self._wakeup.wait(0.2)
                 self._wakeup.clear()
-                if self._lead_silence_bytes:
-                    self._write_lead_silence()
                 while self._queue:
-                    chunk = self._queue.popleft()
-                    self._wf.writeframes(chunk)
-                    self.bytes_written += len(chunk)
+                    item = self._queue.popleft()
+                    if isinstance(item, int):
+                        self._write_silence(item)
+                    else:
+                        self._wf.writeframes(item)
+                        self.bytes_written += len(item)
                 if self._closing and not self._queue:
                     self._wf.close()
                     self._closed.set()
@@ -158,11 +178,9 @@ class _WavWriter:
                 pass
             self._closed.set()
 
-    def _write_lead_silence(self):
-        """Fyld hullet fra optagestart til første lyddata. Skrives i portioner,
-        så en lang pause ikke kræver én kæmpe buffer i hukommelsen."""
-        remaining = self._lead_silence_bytes
-        self._lead_silence_bytes = 0
+    def _write_silence(self, remaining: int):
+        """Fyld et hul med stilhed. Skrives i portioner, så en lang pause ikke
+        kræver én kæmpe buffer i hukommelsen."""
         block = bytes(65536)
         while remaining > 0:
             size = min(len(block), remaining)
@@ -187,17 +205,23 @@ class _WavWriter:
         self._closed.wait(timeout=15)
 
 
-def lead_silence_ms(seconds: float | None) -> float | None:
-    """Udfyldt stilhed foran et spor i ms — kun til logning.
+class GapReport:
+    """Hvor mange huller blev fyldt ud i et spor, og hvor meget i alt.
 
-    Melodisporet får udfyldt hullet fra optagestart til musikken faktisk
-    begyndte at spille, fordi WASAPI-loopback ikke leverer data imens. Tallet
-    er altså 'hvor længe der gik, før musikken kom i gang' — nyttigt at kunne
-    se i loggen, men sporene er allerede synkrone, så der er intet at rette.
+    Tallene er ren diagnostik: sporet er synkront takket være udfyldningen.
+    Men bliver de ved med at være store, virker stilheds-afspilningen (som
+    skal holde lydenheden vågen) ikke som forventet.
     """
-    if seconds is None:
-        return None
-    return seconds * 1000.0
+
+    def __init__(self, count: int = 0, seconds: float = 0.0):
+        self.count = count
+        self.seconds = seconds
+
+    def __bool__(self) -> bool:
+        return self.count > 0
+
+    def __repr__(self) -> str:
+        return f"{self.count} hul(ler), {self.seconds:.1f} sek"
 
 
 class RecordingResult:
@@ -208,17 +232,17 @@ class RecordingResult:
                  loop_seconds: float | None = None,
                  disk_failed: bool = False,
                  loop_tail_silence: float | None = None,
-                 mic_lead_silence_ms: float | None = None,
-                 loop_lead_silence_ms: float | None = None):
+                 mic_gaps: "GapReport | None" = None,
+                 loop_gaps: "GapReport | None" = None):
         self.mic_path = mic_path
         self.loop_path = loop_path
         self.duration = duration
         # Højeste RMS pr. spor; None = ukendt (fx gendannet efter crash)
         self.mic_peak = mic_peak
         self.loop_peak = loop_peak
-        # Udfyldt stilhed foran hvert spor — kun til log; sporene er synkrone
-        self.mic_lead_silence_ms = mic_lead_silence_ms
-        self.loop_lead_silence_ms = loop_lead_silence_ms
+        # Udfyldte huller pr. spor — kun til log; sporene er synkrone
+        self.mic_gaps = mic_gaps or GapReport()
+        self.loop_gaps = loop_gaps or GapReport()
         self.overflows = overflows
         self.mic_seconds = mic_seconds
         self.loop_seconds = loop_seconds
@@ -239,26 +263,27 @@ def _collect_stats(mic_writer: _WavWriter | None, loop_writer: _WavWriter | None
     disk_failed = False
     mic_peak = loop_peak = mic_seconds = loop_seconds = None
     loop_tail_silence = None
-    mic_lead = loop_lead = None
+    mic_gaps = loop_gaps = None
     if mic_writer is not None:
         mic_peak = mic_writer.max_level
         mic_seconds = mic_writer.seconds_written
         overflows += mic_writer.overflows
         disk_failed = disk_failed or mic_writer.write_failed
-        mic_lead = lead_silence_ms(mic_writer.lead_silence_seconds)
+        mic_gaps = GapReport(mic_writer.filled_gaps, mic_writer.filled_seconds)
     if loop_writer is not None:
         loop_peak = loop_writer.max_level
         loop_seconds = loop_writer.seconds_written
         overflows += loop_writer.overflows
         disk_failed = disk_failed or loop_writer.write_failed
         loop_tail_silence = loop_writer.tail_silence_seconds
-        loop_lead = lead_silence_ms(loop_writer.lead_silence_seconds)
+        loop_gaps = GapReport(loop_writer.filled_gaps,
+                              loop_writer.filled_seconds)
     return dict(mic_path=mic_path, loop_path=loop_path,
                 mic_peak=mic_peak, loop_peak=loop_peak,
                 overflows=overflows,
                 mic_seconds=mic_seconds, loop_seconds=loop_seconds,
                 disk_failed=disk_failed, loop_tail_silence=loop_tail_silence,
-                mic_lead_silence_ms=mic_lead, loop_lead_silence_ms=loop_lead)
+                mic_gaps=mic_gaps, loop_gaps=loop_gaps)
 
 
 class DualRecorder:
@@ -355,6 +380,7 @@ class _WindowsBackend:
         self._mic_info = self._find_mic(mic_name)
         self._loop_info = self._find_loopback(loop_name)
         self.has_loopback = self._loop_info is not None
+        self._keepalive = None   # stilheds-afspilning, se _start_keepalive
 
     @property
     def mic_level(self) -> float:
@@ -452,6 +478,47 @@ class _WindowsBackend:
         )
         self._streams.append(stream)
 
+    def _start_keepalive(self):
+        """Afspil konstant, uhørlig stilhed på melodikildens enhed.
+
+        WASAPI-loopback leverer kun data, når der faktisk renderes lyd. Uden
+        det her forsvinder de sekunder, hvor musikken tier — pause i videoen,
+        buffering, reklame — helt ud af melodisporet, og alt derefter ligger
+        for tidligt. Ved at holde endpointet vågent kan hullerne slet ikke
+        opstå.
+
+        Fejler det, må optagelsen ikke vælte: hul-udfyldningen i _WavWriter
+        er sikkerhedsnettet, og loggen afslører at vi er havnet der.
+        """
+        pyaudio = self._pa_module
+        try:
+            index = self._loop_info.get("hostApiSpecificStreamInfo") or {}
+            device = self._loop_info["index"]
+            # Loopback-enheden peger på det render-endpoint vi vil holde vågent
+            rate = int(self._loop_info["defaultSampleRate"])
+            channels = max(1, int(self._loop_info.get("maxOutputChannels") or 2))
+            silence = bytes(2 * channels * 1024)
+
+            def callback(in_data, frame_count, time_info, status):
+                return (silence[: 2 * channels * frame_count], pyaudio.paContinue)
+
+            self._keepalive = self._pa.open(
+                format=pyaudio.paInt16,
+                channels=channels,
+                rate=rate,
+                output=True,
+                output_device_index=device,
+                frames_per_buffer=1024,
+                stream_callback=callback,
+                start=False,
+            )
+            log.info("Stilheds-afspilning klar på melodikilden (%d kanaler, "
+                     "%d Hz) — holder lydenheden vågen", channels, rate)
+        except Exception as exc:
+            self._keepalive = None
+            log.warning("Kunne ikke holde lydenheden vågen (%s) — huller i "
+                        "melodisporet fyldes i stedet ud bagefter", exc)
+
     def start(self, out_dir: str):
         if self._mic_info is None:
             raise CaptureError(
@@ -472,11 +539,18 @@ class _WindowsBackend:
             self._loop_writer = _WavWriter(self._loop_path, loop_ch, loop_rate)
             self._writers.append(self._loop_writer)
             self._open_stream(self._loop_info, self._loop_writer, loop_ch, loop_rate)
+            self._start_keepalive()
 
-        # Begge enheder er klar — ét fælles nulpunkt, og så i gang.
-        # Sporene fylder selv stilhed i, hvis de først leverer data senere
-        # (WASAPI-loopback tier, indtil der faktisk afspilles lyd), så begge
-        # WAV-filer starter præcis dér, hvor der blev trykket Optag.
+        # Alt er klar — ét fælles nulpunkt, og så i gang. Stilheds-afspilningen
+        # startes FØRST, så endpointet allerede er vågent, når loopbacken
+        # begynder at lytte; ellers ville det første stykke stadig mangle.
+        if self._keepalive is not None:
+            try:
+                self._keepalive.start_stream()
+            except OSError as exc:
+                log.warning("Stilheds-afspilningen kunne ikke starte: %s", exc)
+                self._keepalive = None
+
         start_ts = time.monotonic()
         for writer in self._writers:
             writer.begin(start_ts)
@@ -485,8 +559,7 @@ class _WindowsBackend:
 
     def stop(self):
         # Stop alle streams FØR nogen lukkes: close() kan tage tid, og imens
-        # ville den anden stream optage videre og forurene sporlængderne,
-        # som vi bruger til at måle startforskydningen
+        # ville den anden stream optage videre og forurene sporlængderne
         for stream in self._streams:
             try:
                 stream.stop_stream()
@@ -498,6 +571,16 @@ class _WindowsBackend:
             except OSError:
                 pass
         self._streams.clear()
+
+        # Stilheds-afspilningen skal først slippe enheden, når der ikke
+        # optages mere — ellers kunne endpointet nå at sove i halen
+        if self._keepalive is not None:
+            try:
+                self._keepalive.stop_stream()
+                self._keepalive.close()
+            except OSError:
+                pass
+            self._keepalive = None
 
         for writer in self._writers:
             writer.close()

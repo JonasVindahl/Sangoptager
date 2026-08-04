@@ -36,6 +36,11 @@ except ImportError:  # QtMultimedia mangler — skjul blot prøvelyt-knappen
 # et normalt outro/fade aldrig giver falsk alarm.
 LOOP_TAIL_SILENCE_S = 20.0
 
+# Så meget udfyldt stilhed i melodisporet er værd at nævne før der gemmes.
+# Sporet er tidsmæssigt korrekt, men så lange pauser betyder som regel, at
+# videoen hakkede eller blev sat på pause.
+BIG_GAP_S = 2.0
+
 
 class _PreviewWorker(QThread):
     done = Signal(str)
@@ -172,6 +177,13 @@ class SaveDialog(QDialog):
                 f"Melodien forsvandt de sidste "
                 f"{int(self._result.loop_tail_silence)} sekunder — skiftede "
                 "lyden til en anden højttaler undervejs?"
+            )
+        gaps = self._result.loop_gaps
+        if gaps.count and gaps.seconds >= BIG_GAP_S:
+            warnings.append(
+                f"Melodien tav i alt {gaps.seconds:.0f} sekunder undervejs — "
+                "spillede videoen uafbrudt? Optagelsen er tidsmæssigt korrekt, "
+                "men lyt den igennem."
             )
         if self._result.overflows > 0:
             warnings.append(

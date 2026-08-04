@@ -102,7 +102,8 @@ class SaveWorker(QThread):
                 now.strftime("%Y-%m-%d_%H-%M-%S_") + self._title,
                 dict(titel=self._title, destination=dest,
                      balance=self._balance, normalize=self._settings.normalize,
-                     lead_silence_ms=self._result.loop_lead_silence_ms,
+                     udfyldte_huller=self._result.loop_gaps.count,
+                     udfyldt_sek=round(self._result.loop_gaps.seconds, 2),
                      overflows=self._result.overflows),
             )
             _cleanup_temp()
@@ -502,18 +503,19 @@ class MainWindow(QMainWindow):
                  "overflows=%d, sporlængder=%s/%s sek",
                  p.duration, p.mic_peak, p.loop_peak,
                  p.overflows, p.mic_seconds, p.loop_seconds)
-        # Kun værd at nævne ved en reel pause; brøkdele af et millisekund er
-        # bare buffer-granularitet og ville skrive "0.0 sek" i loggen
-        if p.loop_lead_silence_ms and p.loop_lead_silence_ms >= 100:
-            log.info("Melodien begyndte at spille %.1f sek inde i optagelsen "
-                     "— hullet er fyldt med stilhed, så sporene er synkrone",
-                     p.loop_lead_silence_ms / 1000)
-        # Sporene skal nu dække samme tidsrum. Gør de ikke det, holdt melodien
-        # op før der blev trykket Stop — værd at vide, hvis noget lyder skævt
+        if p.loop_gaps:
+            log.info("Melodien tav %d gang(e), i alt %.1f sek — fyldt ud med "
+                     "stilhed, så sporet ikke mister tid", p.loop_gaps.count,
+                     p.loop_gaps.seconds)
+        if p.mic_gaps:
+            log.warning("Mikrofonen tav %d gang(e), i alt %.1f sek — usædvanligt",
+                        p.mic_gaps.count, p.mic_gaps.seconds)
+        # Sporene skal nu dække samme tidsrum uanset hvad. Gør de ikke det,
+        # er der noget, udfyldningen ikke fangede
         if p.mic_seconds and p.loop_seconds \
                 and abs(p.mic_seconds - p.loop_seconds) > 0.25:
             log.warning("Sporlængder afviger %.0f ms trods udfyldning — "
-                        "melodien stoppede formentlig før der blev trykket Stop",
+                        "melodien kan ligge forskudt i denne optagelse",
                         abs(p.mic_seconds - p.loop_seconds) * 1000)
         self._resolve_pending()
 

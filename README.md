@@ -31,12 +31,21 @@ midt i det hele, siger statuslinjen til med det samme. Appen kan kun køre i
 én instans — endnu et dobbeltklik fronter bare det åbne vindue.
 Fejlsøgning: `%APPDATA%\Sangoptager\app.log`.
 
-**Synkronisering:** Begge spor begynder præcis dér, hvor der blev trykket
-Optag. Det kræver et modtræk, fordi WASAPI-loopback ikke leverer data, før
-der faktisk afspilles lyd: uden det ville melodisporets første sample være
-det øjeblik, musikken startede, og sporet ville ligge for tidligt. Optagelsen
-fylder derfor selv stilhed i hullet fra optagestart til første lyd, så de to
-WAV-filer dækker samme tidsrum og kan lægges råt oven på hinanden.
+**Synkronisering:** Melodisporet skal dække nøjagtig samme tidsrum som
+mikrofonen — fra Optag til Stop. Det kræver to modtræk, fordi WASAPI-loopback
+kun leverer data, mens der faktisk afspilles lyd.
+
+For det første afspiller appen selv konstant, uhørlig stilhed på melodikildens
+enhed, så længe der optages. Så har Windows altid noget at rendere, endpointet
+sover ikke, og loopbacken leverer uafbrudt.
+
+For det andet — som sikkerhedsnet, hvis det skulle svigte — sammenlignes ved
+hver buffer den forløbne tid med hvor meget sporet har modtaget. Mangler der
+over et halvt sekund, fyldes hullet med stilhed. Tærsklen er sat højt med
+vilje: buffere leveres nogle gange i små bundter, og en lavere grænse ville
+indsætte stilhed, der aldrig var der. Uden dette forsvandt sekunderne fra en
+pause i videoen helt ud af sporet, og resten af sangen lå for tidligt — hvilket
+ramte omkring hver tiende optagelse.
 
 Mixet forskyder aldrig noget. Tre tidligere forsøg på at rette timingen dér
 gjorde det kun værre — ADC-tidsstempler uden fælles nulpunkt (v1.3.0–v1.6.0),

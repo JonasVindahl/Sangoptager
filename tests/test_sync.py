@@ -33,8 +33,7 @@ needs_ffmpeg = pytest.mark.skipif(
 
 def test_writer_pads_the_gap_before_first_audio(tmp_path):
     """WASAPI-loopback tier, indtil der spiller lyd. Sporet skal selv fylde
-    hullet fra optagestart til første buffer, så filen begynder dér hvor der
-    blev trykket Optag."""
+    hullet fra optagestart til første buffer."""
     rate = 8000
     writer = _WavWriter(str(tmp_path / "melodi.wav"), channels=1, rate=rate)
     writer.begin(time.monotonic() - 2.0)      # der gik 2 sek. før musikken kom
@@ -46,7 +45,44 @@ def test_writer_pads_the_gap_before_first_audio(tmp_path):
     # Bufferen dækker selv det sidste sekund, så der mangler 1 sek. stilhed
     # foran — filen dækker i alt de 2 sek. siden der blev trykket Optag
     assert seconds == pytest.approx(2.0, abs=0.1)
-    assert writer.lead_silence_seconds == pytest.approx(1.0, abs=0.1)
+    assert writer.filled_gaps == 1
+
+
+def test_writer_fills_a_gap_in_the_middle(tmp_path):
+    """Kernen i den sporadiske fejl: melodien tier MIDT i sangen — videoen
+    sættes på pause, hakker, eller der kommer en reklame. Loopbacken leverer
+    intet imens, og uden udfyldning ville de sekunder mangle, så resten af
+    sangen lå for tidligt."""
+    rate = 8000
+    t0 = time.monotonic()
+    writer = _WavWriter(str(tmp_path / "melodi.wav"), channels=1, rate=rate)
+    writer.begin(t0)
+
+    writer.write(bytes(2 * rate))          # 1 sek. musik
+    writer._start_ts = t0 - 4.0            # …så gik der 3 sek. uden data
+    writer.write(bytes(2 * rate))          # 1 sek. musik igen
+    writer.close()
+
+    with wave.open(str(tmp_path / "melodi.wav")) as wf:
+        seconds = wf.getnframes() / wf.getframerate()
+    assert seconds == pytest.approx(4.0, abs=0.15)   # 1 + 2 hul + 1
+    assert writer.filled_gaps == 1
+    assert writer.filled_seconds == pytest.approx(2.0, abs=0.15)
+
+
+def test_writer_ignores_jitter_below_threshold(tmp_path):
+    """Små udsving er planlægnings-jitter, ikke huller. Fyldte vi dem ud,
+    ville vi indsætte stilhed der aldrig var der."""
+    rate = 8000
+    t0 = time.monotonic()
+    writer = _WavWriter(str(tmp_path / "mic.wav"), channels=1, rate=rate)
+    writer.begin(t0)
+    writer.write(bytes(2 * rate))
+    writer._start_ts = t0 - 1.2            # 200 ms bagud — under tærsklen
+    writer.write(bytes(2 * rate))
+    writer.close()
+
+    assert writer.filled_gaps == 0
 
 
 def test_writer_pads_nothing_when_audio_arrives_at_once(tmp_path):
@@ -56,26 +92,34 @@ def test_writer_pads_nothing_when_audio_arrives_at_once(tmp_path):
     writer.write(bytes(2 * rate))
     writer.close()
 
-    assert writer.lead_silence_seconds == 0.0
+    assert writer.filled_gaps == 0
     with wave.open(str(tmp_path / "mic.wav")) as wf:
         assert wf.getnframes() == rate
 
 
 def test_both_tracks_share_the_same_zero_point(tmp_path):
-    """Kernen: begge spor startes på samme nulpunkt og stoppes samtidig.
-    Mikrofonen leverer lyd hele vejen; melodien først 2 sek. inde. Efter
-    udfyldning skal filerne dække nøjagtig samme tidsrum — så kan de lægges
-    oven på hinanden råt, uden at mixet skal rette noget."""
+    """Et realistisk forløb over 6 sekunder: mikrofonen leverer uafbrudt,
+    mens melodien tier de første 2 sek. og igen 1 sek. midtvejs. Begge filer
+    skal dække samme tidsrum, så de kan lægges råt oven på hinanden.
+
+    _start_ts flyttes mellem kaldene for at simulere, at uret er gået —
+    hver buffer må kun indeholde lyd, der er plads til i den forløbne tid.
+    """
     rate = 8000
-    t0 = time.monotonic() - 3.0          # der blev trykket Optag for 3 sek. siden
+    now = time.monotonic()
 
     mic = _WavWriter(str(tmp_path / "mic.wav"), channels=1, rate=rate)
     mel = _WavWriter(str(tmp_path / "melodi.wav"), channels=1, rate=rate)
-    mic.begin(t0)
-    mel.begin(t0)
 
-    mic.write(bytes(2 * rate * 3))       # 3 sek. lyd — mikrofonen var med fra start
-    mel.write(bytes(2 * rate * 1))       # 1 sek. lyd — musikken kom 2 sek. inde
+    # Mikrofonen: 6 sek. lyd på 6 sek. — intet at fylde ud
+    mic.begin(now - 6.0)
+    mic.write(bytes(2 * rate * 6))
+
+    mel.begin(now - 4.0)                 # 4 sek. gået: 2 stille + 2 med musik
+    mel.write(bytes(2 * rate * 2))
+    mel._start_ts = now - 6.0            # 6 sek. gået: 1 sek. hul, så 1 med musik
+    mel.write(bytes(2 * rate * 1))
+
     mic.close()
     mel.close()
 
@@ -83,10 +127,11 @@ def test_both_tracks_share_the_same_zero_point(tmp_path):
     for name in ("mic.wav", "melodi.wav"):
         with wave.open(str(tmp_path / name)) as wf:
             lengths.append(wf.getnframes() / wf.getframerate())
-    assert lengths[0] == pytest.approx(3.0, abs=0.1)
-    assert lengths[1] == pytest.approx(lengths[0], abs=0.1)
-    assert mic.lead_silence_seconds == pytest.approx(0.0, abs=0.05)
-    assert mel.lead_silence_seconds == pytest.approx(2.0, abs=0.1)
+    assert lengths[0] == pytest.approx(6.0, abs=0.15)
+    assert lengths[1] == pytest.approx(lengths[0], abs=0.15)
+    assert mic.filled_gaps == 0
+    assert mel.filled_gaps == 2           # hullet foran og hullet midtvejs
+    assert mel.filled_seconds == pytest.approx(3.0, abs=0.15)
 
 
 # ── build_filter forskyder aldrig ───────────────────────────────────────────
