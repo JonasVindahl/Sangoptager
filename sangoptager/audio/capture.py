@@ -148,10 +148,13 @@ class _WavWriter:
 
 def compute_offset_ms(mic_ts: float | None, loop_ts: float | None,
                       same_clock: bool = True) -> float | None:
-    """Startforskydning i ms (positiv = mic-streamen startede senere).
+    """Forskel mellem sporenes første tidsstempler i ms — KUN til diagnostik.
 
-    None hvis et tidsstempel mangler, eller de to stammer fra forskellige
-    klokker (ADC vs. monotonic) og derfor ikke kan sammenlignes.
+    Værdien må ikke bruges til at tidsforskyde sporene i mixet. Mikrofon og
+    loopback er to uafhængige PortAudio-streams, og PortAudios ADC-tidsstempler
+    gælder kun inden for én stream — de har ikke fælles nulpunkt. Differencen
+    er derfor ikke en ægte startforskydning, men den er nyttig i loggen, når
+    en optagelse skal fejlsøges.
     """
     if mic_ts is None or loop_ts is None or not same_clock:
         return None
@@ -172,7 +175,8 @@ class RecordingResult:
         # Højeste RMS pr. spor; None = ukendt (fx gendannet efter crash)
         self.mic_peak = mic_peak
         self.loop_peak = loop_peak
-        # Målt startforskydning mellem sporene; None = ukendt → ingen kompensation
+        # Diagnostisk tidsstempel-difference mellem sporene (se
+        # compute_offset_ms) — bruges kun i log og arkiv, aldrig i mixet
         self.offset_ms = offset_ms
         self.overflows = overflows
         self.mic_seconds = mic_seconds

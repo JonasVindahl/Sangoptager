@@ -87,8 +87,7 @@ class SaveWorker(QThread):
 
             tmp_mp3 = os.path.join(temp_recording_dir(), "mix.mp3")
             mixdown(self._result.mic_path, self._result.loop_path,
-                    tmp_mp3, self._balance, self._settings.normalize,
-                    self._result.offset_ms)
+                    tmp_mp3, self._balance, self._settings.normalize)
 
             dest = unique_path(
                 os.path.join(dest_dir, build_filename(self._title, now)))
