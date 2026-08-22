@@ -3,16 +3,23 @@
 Balancen (0..1) styrer forholdet mellem stemme og melodi med equal-power-
 kurver, så samlet lydstyrke føles konstant når man skruer:
     0.0 = kun melodi, 0.5 = neutral, 1.0 = kun mikrofon.
-En limiter til sidst forhindrer digital klipning af summen.
+
+Normalisering kører i to gennemløb (EBU R128): først måles hele mixet,
+derefter anvendes ét konstant gain — så sangene ender med samme oplevede
+lydstyrke uden at ducke stemme og melodi i forhold til hinanden.
 """
 
 from __future__ import annotations
 
+import json as _json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
+
+from ..logsetup import log
 
 MP3_BITRATE = "320k"
 
@@ -61,6 +68,45 @@ def balance_gains(balance: float) -> tuple[float, float]:
 _LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"
 
 
+def _parse_loudnorm_stats(stderr: str) -> dict | None:
+    """Udtræk loudnorm-målingens JSON fra ffmpeg stderr."""
+    cleaned = re.sub(r'\[Parsed_loudnorm_\d+ @ 0x[0-9a-f]+\]\s*', '', stderr)
+    for match in reversed(list(re.finditer(r'\{[^{}]+\}', cleaned, re.DOTALL))):
+        try:
+            stats = _json.loads(match.group())
+            if 'input_i' in stats:
+                return stats
+        except ValueError:
+            continue
+    return None
+
+
+def _loudnorm_linear(stats: dict) -> str:
+    """Loudnorm med målte værdier — lineært (konstant) gain, ingen ducking."""
+    return (
+        f"{_LOUDNORM}"
+        f":measured_I={stats['input_i']}"
+        f":measured_TP={stats['input_tp']}"
+        f":measured_LRA={stats['input_lra']}"
+        f":measured_thresh={stats['input_thresh']}"
+        f":offset={stats['target_offset']}"
+        f":linear=true"
+    )
+
+
+def _build_mix(mic_gain: float, loop_gain: float, finisher: str,
+               two_inputs: bool) -> str:
+    """Byg filterkæden med en given finisher (loudnorm eller limiter)."""
+    if not two_inputs:
+        return finisher
+    return (
+        f"[0:a]volume={mic_gain:.4f}[voc];"
+        f"[1:a]volume={loop_gain:.4f}[mel];"
+        "[voc][mel]amix=inputs=2:duration=longest:normalize=0,"
+        + finisher
+    )
+
+
 def build_filter(mic_gain: float, loop_gain: float, normalize: bool,
                  two_inputs: bool = True) -> str:
     """ffmpeg-filterkæden: balance, sum og afsluttende limiter/normalisering.
@@ -76,15 +122,29 @@ def build_filter(mic_gain: float, loop_gain: float, normalize: bool,
     hjemme i optagelsen, ikke i mixet.
     """
     finisher = _LOUDNORM if normalize else "alimiter=limit=0.97"
-    if not two_inputs:
-        return finisher
+    return _build_mix(mic_gain, loop_gain, finisher, two_inputs)
 
-    return (
-        f"[0:a]volume={mic_gain:.4f}[voc];"
-        f"[1:a]volume={loop_gain:.4f}[mel];"
-        "[voc][mel]amix=inputs=2:duration=longest:normalize=0,"
-        + finisher
-    )
+
+def _measure_loudness(ffmpeg: str, inputs: list[str], mic_gain: float,
+                      loop_gain: float, two_inputs: bool) -> dict | None:
+    """Første gennemløb: mål lydstyrke uden at skrive output."""
+    filt = _build_mix(mic_gain, loop_gain,
+                      f"{_LOUDNORM}:print_format=json", two_inputs)
+    null_out = "NUL" if sys.platform == "win32" else "/dev/null"
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "info"]
+    for path in inputs:
+        cmd += ["-i", path]
+    cmd += ["-filter_complex", filt, "-f", "null", null_out]
+
+    creationflags = 0x08000000 if sys.platform == "win32" else 0
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              creationflags=creationflags)
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return _parse_loudnorm_stats(proc.stderr)
 
 
 def mixdown(
@@ -96,10 +156,12 @@ def mixdown(
 ) -> str:
     """Mix (eller konvertér et enkelt spor) til MP3. Returnerer stien.
 
-    normalize=True kører EBU R128 loudness-normalisering, så alle sange
-    ender med samme oplevede lydstyrke. Sporene tidsforskydes ikke — de er
-    allerede synkrone fra optagelsen. WAV-filerne røres ikke — kald selv
-    cleanup bagefter, når MP3'en er verificeret.
+    normalize=True kører EBU R128 loudness-normalisering i to gennemløb:
+    først måles hele mixet, derefter anvendes ét konstant gain — så alle sange
+    ender med samme oplevede lydstyrke uden at ducke stemme mod melodi.
+    Sporene tidsforskydes ikke — de er allerede synkrone fra optagelsen.
+    WAV-filerne røres ikke — kald selv cleanup bagefter, når MP3'en er
+    verificeret.
     """
     inputs = [p for p in (mic_wav, loop_wav) if p and os.path.isfile(p)]
     if not inputs:
@@ -107,13 +169,27 @@ def mixdown(
 
     ffmpeg = find_ffmpeg()
     mic_gain, loop_gain = balance_gains(balance)
+    two_inputs = len(inputs) == 2
+
+    if normalize:
+        stats = _measure_loudness(ffmpeg, inputs, mic_gain, loop_gain,
+                                  two_inputs)
+        if stats is not None:
+            finisher = _loudnorm_linear(stats)
+            log.info("Loudnorm two-pass: input_i=%s, target_offset=%s",
+                     stats.get('input_i'), stats.get('target_offset'))
+        else:
+            finisher = _LOUDNORM
+            log.warning("Loudnorm-måling fejlede — falder tilbage til "
+                        "single-pass (dynamisk)")
+    else:
+        finisher = "alimiter=limit=0.97"
+
+    filt = _build_mix(mic_gain, loop_gain, finisher, two_inputs)
 
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
     for path in inputs:
         cmd += ["-i", path]
-
-    filt = build_filter(mic_gain, loop_gain, normalize,
-                        two_inputs=len(inputs) == 2)
 
     cmd += [
         "-filter_complex", filt,
