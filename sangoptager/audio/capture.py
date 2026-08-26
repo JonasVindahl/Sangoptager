@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import wave
+from typing import NamedTuple
 
 from ..logsetup import log
 
@@ -32,6 +33,13 @@ _METER_DECAY = 0.6
 # Under denne peak-RMS regnes et helt spor for (nær-)stille — ca. -34 dB.
 # En glemt mikrofon eller en melodi der aldrig blev afspillet lander her.
 SILENCE_PEAK = 0.02
+# 16-bit topper ved ±32767 (og -32768). Rammer en sample loftet, er signalet
+# klippet — dét, og ikke et højt RMS, er hvad der lyder forvrænget.
+_FULL_SCALE = 32768.0
+CLIP_LEVEL = 32767 / _FULL_SCALE
+# Hvor længe "klipper lige nu" bliver hængende. En buffer er 23 ms, men UI'et
+# kigger kun hver 80 ms — uden et hold ville de fleste klip aldrig blive vist.
+CLIP_HOLD_S = 1.5
 # Under denne RMS regnes en enkelt buffer for stille i hale-stilheds-målingen
 # (ca. -40 dB — lavere end SILENCE_PEAK, så musikkens svage passager ikke
 # tæller med som "melodien er væk")
@@ -44,11 +52,24 @@ TAIL_SILENCE_RMS = 0.01
 GAP_FILL_MIN_S = 0.5
 
 
-def _rms_level(pcm16: bytes) -> float:
-    """RMS-niveau 0..1 af en buffer med 16-bit PCM."""
+class Levels(NamedTuple):
+    """Øjebliksbillede af et spor til niveaumetret."""
+
+    rms: float = 0.0        # udjævnet RMS 0..1 — bjælkens fyld
+    peak: float = 0.0       # udjævnet sample-peak 0..1 — peak-hold-stregen
+    clipping: bool = False  # sampleværdier har ramt loftet inden for CLIP_HOLD_S
+
+
+def _measure(pcm16: bytes) -> tuple[float, float]:
+    """(RMS, sample-peak) 0..1 af en buffer med 16-bit PCM.
+
+    Begge tal skal bruges hver gang: RMS er den oplevede lydstyrke (bjælken),
+    mens sample-peaken er den eneste der afslører forvrængning. En stemme har
+    12-15 dB mellem de to, så et pænt RMS udelukker ikke klippede toppe.
+    """
     n = len(pcm16) // 2
     if n == 0:
-        return 0.0
+        return 0.0, 0.0
     samples = memoryview(pcm16)[: n * 2].cast("h")
     if hasattr(math, "sumprod"):  # Python 3.12+: C-hastighed
         acc = math.sumprod(samples, samples)
@@ -56,7 +77,9 @@ def _rms_level(pcm16: bytes) -> float:
         acc = 0
         for s in samples:
             acc += s * s
-    return math.sqrt(acc / n) / 32768.0
+    # -min fanger -32768, som abs() ikke kan repræsentere i 16-bit
+    peak = max(max(samples), -min(samples))
+    return math.sqrt(acc / n) / _FULL_SCALE, peak / _FULL_SCALE
 
 
 class _WavWriter:
@@ -72,12 +95,17 @@ class _WavWriter:
         self._wf.setframerate(rate)
         self._channels = channels
         self._rate = rate
+        self._bytes_per_second = 2 * channels * rate
         self._queue: collections.deque[bytes] = collections.deque()
         self._wakeup = threading.Event()
         self._closing = False
         self._closed = threading.Event()
-        self.level = 0.0
+        self.level = 0.0        # udjævnet RMS — bjælkens fyld
+        self.peak_level = 0.0   # udjævnet sample-peak — peak-hold-stregen
         self.max_level = 0.0    # højeste RMS i hele optagelsen (stilheds-tjek)
+        self.max_peak = 0.0     # højeste sampleværdi i hele optagelsen
+        self._clipped_bytes = 0             # bytes i buffere der ramte loftet
+        self._clip_until = 0.0              # monotonic-tid hvor klip-holdet slut
         self.bytes_written = 0
         self.overflows = 0      # antal buffere hvor driveren meldte overflow
         self.write_failed = False           # disk-skrivning er brudt sammen
@@ -114,7 +142,7 @@ class _WavWriter:
         """
         if self._start_ts is None:
             return 0
-        per_sec = 2 * self._channels * self._rate
+        per_sec = self._bytes_per_second
         # Bufferen dækker selv tiden umiddelbart før callbacken
         expected = int((time.monotonic() - self._start_ts) * per_sec) - incoming
         missing = expected - self._accepted
@@ -138,14 +166,19 @@ class _WavWriter:
                 self._queue.append(missing)
                 self._accepted += missing
                 self.filled_gaps += 1
-                self.filled_seconds += missing / (2 * self._channels * self._rate)
+                self.filled_seconds += missing / self._bytes_per_second
             self._queue.append(data)
             self._accepted += len(data)
             self._wakeup.set()
-        raw = _rms_level(data)
-        self.level = max(raw, self.level * _METER_DECAY)
-        self.max_level = max(raw, self.max_level)
-        if raw >= TAIL_SILENCE_RMS:
+        rms, peak = _measure(data)
+        self.level = max(rms, self.level * _METER_DECAY)
+        self.peak_level = max(peak, self.peak_level * _METER_DECAY)
+        self.max_level = max(rms, self.max_level)
+        self.max_peak = max(peak, self.max_peak)
+        if peak >= CLIP_LEVEL:
+            self._clipped_bytes += len(data)
+            self._clip_until = time.monotonic() + CLIP_HOLD_S
+        if rms >= TAIL_SILENCE_RMS:
             self._tail_silence_bytes = 0
         else:
             self._tail_silence_bytes += len(data)
@@ -189,13 +222,26 @@ class _WavWriter:
             remaining -= size
 
     @property
+    def levels(self) -> Levels:
+        """Til niveaumetret — klip-flaget holder CLIP_HOLD_S, så et kort klip
+        ikke når at forsvinde mellem to opdateringer af UI'et."""
+        return Levels(self.level, self.peak_level,
+                      time.monotonic() < self._clip_until)
+
+    @property
     def seconds_written(self) -> float:
-        return self.bytes_written / (2 * self._channels * self._rate)
+        return self.bytes_written / self._bytes_per_second
+
+    @property
+    def clipped_seconds(self) -> float:
+        """Hvor meget af sporet lå i loftet. Tælles pr. buffer, så tallet er
+        rundhåndet — ét klippet sample koster hele bufferens 23 ms."""
+        return self._clipped_bytes / self._bytes_per_second
 
     @property
     def tail_silence_seconds(self) -> float:
         """Hvor længe har sporet været (nær-)stille op til nu?"""
-        return self._tail_silence_bytes / (2 * self._channels * self._rate)
+        return self._tail_silence_bytes / self._bytes_per_second
 
     def close(self):
         if self._closing:
@@ -224,66 +270,114 @@ class GapReport:
         return f"{self.count} hul(ler), {self.seconds:.1f} sek"
 
 
+class TrackStats:
+    """Hvad der blev målt på ét spor gennem en optagelse."""
+
+    def __init__(self, rms_peak: float = 0.0, true_peak: float = 0.0,
+                 clipped_seconds: float = 0.0, seconds: float = 0.0,
+                 overflows: int = 0, tail_silence: float = 0.0,
+                 gaps: GapReport | None = None, write_failed: bool = False):
+        # Højeste RMS — afslører et spor der stod (nær-)stille hele vejen
+        self.rms_peak = rms_peak
+        # Højeste sampleværdi — afslører forvrængning, som RMS ikke kan
+        self.true_peak = true_peak
+        self.clipped_seconds = clipped_seconds
+        self.seconds = seconds              # sporets længde på disken
+        self.overflows = overflows          # buffere driveren meldte tabt
+        self.tail_silence = tail_silence    # stilhed op til stop
+        # Udfyldte huller — kun til log; sporet er synkront takket være dem
+        self.gaps = gaps or GapReport()
+        self.write_failed = write_failed
+
+    @classmethod
+    def of(cls, writer: _WavWriter) -> TrackStats:
+        return cls(
+            rms_peak=writer.max_level,
+            true_peak=writer.max_peak,
+            clipped_seconds=writer.clipped_seconds,
+            seconds=writer.seconds_written,
+            overflows=writer.overflows,
+            tail_silence=writer.tail_silence_seconds,
+            gaps=GapReport(writer.filled_gaps, writer.filled_seconds),
+            write_failed=writer.write_failed,
+        )
+
+
 class RecordingResult:
-    def __init__(self, mic_path: str | None, loop_path: str | None, duration: float,
-                 mic_peak: float | None = None, loop_peak: float | None = None,
-                 overflows: int = 0,
-                 mic_seconds: float | None = None,
-                 loop_seconds: float | None = None,
-                 disk_failed: bool = False,
-                 loop_tail_silence: float | None = None,
-                 mic_gaps: "GapReport | None" = None,
-                 loop_gaps: "GapReport | None" = None):
+    """Stier, længde og måletal for én optagelse.
+
+    mic/loop er None når sporet ikke findes — eller når måletallene er ukendte,
+    fx en optagelse der gendannes fra disken efter et crash. Advarslerne i
+    gem-dialogen springes så over frem for at gætte.
+    """
+
+    def __init__(self, mic_path: str | None, loop_path: str | None,
+                 duration: float, mic: TrackStats | None = None,
+                 loop: TrackStats | None = None):
         self.mic_path = mic_path
         self.loop_path = loop_path
         self.duration = duration
-        # Højeste RMS pr. spor; None = ukendt (fx gendannet efter crash)
-        self.mic_peak = mic_peak
-        self.loop_peak = loop_peak
-        # Udfyldte huller pr. spor — kun til log; sporene er synkrone
-        self.mic_gaps = mic_gaps or GapReport()
-        self.loop_gaps = loop_gaps or GapReport()
-        self.overflows = overflows
-        self.mic_seconds = mic_seconds
-        self.loop_seconds = loop_seconds
-        # True hvis disk-skrivningen brød sammen undervejs (spor ufuldstændige)
-        self.disk_failed = disk_failed
-        # Sekunder melodisporet var stille op til stop; None = ukendt
-        self.loop_tail_silence = loop_tail_silence
+        self.mic = mic
+        self.loop = loop
+
+    @property
+    def tracks(self) -> tuple[TrackStats, ...]:
+        return tuple(t for t in (self.mic, self.loop) if t is not None)
+
+    @property
+    def overflows(self) -> int:
+        return sum(t.overflows for t in self.tracks)
+
+    @property
+    def disk_failed(self) -> bool:
+        """True hvis disk-skrivningen brød sammen undervejs (spor ufuldstændige)."""
+        return any(t.write_failed for t in self.tracks)
 
 
 class CaptureError(RuntimeError):
     """Fejl der skal vises for brugeren (manglende enhed osv.)."""
 
 
-def _collect_stats(mic_writer: _WavWriter | None, loop_writer: _WavWriter | None,
-                   mic_path: str | None, loop_path: str | None) -> dict:
-    """Samler stop()-statistik fra writerne til RecordingResult-felter."""
-    overflows = 0
-    disk_failed = False
-    mic_peak = loop_peak = mic_seconds = loop_seconds = None
-    loop_tail_silence = None
-    mic_gaps = loop_gaps = None
-    if mic_writer is not None:
-        mic_peak = mic_writer.max_level
-        mic_seconds = mic_writer.seconds_written
-        overflows += mic_writer.overflows
-        disk_failed = disk_failed or mic_writer.write_failed
-        mic_gaps = GapReport(mic_writer.filled_gaps, mic_writer.filled_seconds)
-    if loop_writer is not None:
-        loop_peak = loop_writer.max_level
-        loop_seconds = loop_writer.seconds_written
-        overflows += loop_writer.overflows
-        disk_failed = disk_failed or loop_writer.write_failed
-        loop_tail_silence = loop_writer.tail_silence_seconds
-        loop_gaps = GapReport(loop_writer.filled_gaps,
-                              loop_writer.filled_seconds)
-    return dict(mic_path=mic_path, loop_path=loop_path,
-                mic_peak=mic_peak, loop_peak=loop_peak,
-                overflows=overflows,
-                mic_seconds=mic_seconds, loop_seconds=loop_seconds,
-                disk_failed=disk_failed, loop_tail_silence=loop_tail_silence,
-                mic_gaps=mic_gaps, loop_gaps=loop_gaps)
+class _Backend:
+    """Fælles tilstand for de to backends: writerne og aflæsningen af dem."""
+
+    def __init__(self):
+        self.has_loopback = False
+        self.mic_writer: _WavWriter | None = None
+        self.loop_writer: _WavWriter | None = None
+        self.mic_path: str | None = None
+        self.loop_path: str | None = None
+
+    @property
+    def writers(self) -> list[_WavWriter]:
+        return [w for w in (self.mic_writer, self.loop_writer) if w is not None]
+
+    @property
+    def mic_levels(self) -> Levels:
+        return self.mic_writer.levels if self.mic_writer else Levels()
+
+    @property
+    def loop_levels(self) -> Levels:
+        return self.loop_writer.levels if self.loop_writer else Levels()
+
+    @property
+    def mic_bytes(self) -> int:
+        return self.mic_writer.bytes_written if self.mic_writer else 0
+
+    @property
+    def disk_failed(self) -> bool:
+        return any(w.write_failed for w in self.writers)
+
+    def _take_stats(self) -> dict:
+        """Saml måletallene fra stop() og slip writerne."""
+        stats = dict(
+            mic_path=self.mic_path, loop_path=self.loop_path,
+            mic=TrackStats.of(self.mic_writer) if self.mic_writer else None,
+            loop=TrackStats.of(self.loop_writer) if self.loop_writer else None,
+        )
+        self.mic_writer = self.loop_writer = None
+        self.mic_path = self.loop_path = None
+        return stats
 
 
 class DualRecorder:
@@ -295,7 +389,7 @@ class DualRecorder:
     Brug:
         rec = DualRecorder(mic_name=..., loop_name=...)
         rec.start(tmpdir)
-        ... rec.mic_level / rec.loop_level opdateres løbende ...
+        ... rec.mic_levels / rec.loop_levels opdateres løbende ...
         result = rec.stop()
     """
 
@@ -308,12 +402,12 @@ class DualRecorder:
         self._duration: float = 0.0
 
     @property
-    def mic_level(self) -> float:
-        return self._backend.mic_level
+    def mic_levels(self) -> Levels:
+        return self._backend.mic_levels
 
     @property
-    def loop_level(self) -> float:
-        return self._backend.loop_level
+    def loop_levels(self) -> Levels:
+        return self._backend.loop_levels
 
     @property
     def has_loopback(self) -> bool:
@@ -322,17 +416,12 @@ class DualRecorder:
     @property
     def mic_bytes(self) -> int:
         """Bytes modtaget fra mikrofonen indtil nu — til vagthund i UI'et."""
-        writer = getattr(self._backend, "_mic_writer", None)
-        return writer.bytes_written if writer is not None else 0
+        return self._backend.mic_bytes
 
     @property
     def disk_failed(self) -> bool:
         """True hvis disk-skrivningen er brudt sammen — til vagthund i UI'et."""
-        for name in ("_mic_writer", "_loop_writer"):
-            writer = getattr(self._backend, name, None)
-            if writer is not None and writer.write_failed:
-                return True
-        return False
+        return self._backend.disk_failed
 
     def device_summary(self) -> str:
         return self._backend.device_summary()
@@ -359,32 +448,20 @@ class DualRecorder:
         self._backend.close()
 
 
-class _WindowsBackend:
+class _WindowsBackend(_Backend):
     """PyAudioWPatch: mikrofon + WASAPI-loopback, valgfrit navngivet enhed."""
 
     def __init__(self, mic_name: str | None = None, loop_name: str | None = None):
         import pyaudiowpatch as pyaudio
 
+        super().__init__()
         self._pa_module = pyaudio
         self._pa = pyaudio.PyAudio()
         self._streams = []
-        self._writers: list[_WavWriter] = []
-        self._mic_writer: _WavWriter | None = None
-        self._loop_writer: _WavWriter | None = None
-        self._mic_path: str | None = None
-        self._loop_path: str | None = None
         self._mic_info = self._find_mic(mic_name)
         self._loop_info = self._find_loopback(loop_name)
         self.has_loopback = self._loop_info is not None
         self._keepalive = None   # stilheds-afspilning, se _start_keepalive
-
-    @property
-    def mic_level(self) -> float:
-        return self._mic_writer.level if self._mic_writer else 0.0
-
-    @property
-    def loop_level(self) -> float:
-        return self._loop_writer.level if self._loop_writer else 0.0
 
     def _wasapi_index(self):
         try:
@@ -522,18 +599,16 @@ class _WindowsBackend:
 
         mic_rate = int(self._mic_info["defaultSampleRate"])
         mic_ch = min(2, max(1, int(self._mic_info["maxInputChannels"])))
-        self._mic_path = os.path.join(out_dir, MIC_FILENAME)
-        self._mic_writer = _WavWriter(self._mic_path, mic_ch, mic_rate)
-        self._writers.append(self._mic_writer)
-        self._open_stream(self._mic_info, self._mic_writer, mic_ch, mic_rate)
+        self.mic_path = os.path.join(out_dir, MIC_FILENAME)
+        self.mic_writer = _WavWriter(self.mic_path, mic_ch, mic_rate)
+        self._open_stream(self._mic_info, self.mic_writer, mic_ch, mic_rate)
 
         if self._loop_info is not None:
             loop_rate = int(self._loop_info["defaultSampleRate"])
             loop_ch = max(1, int(self._loop_info["maxInputChannels"]))
-            self._loop_path = os.path.join(out_dir, LOOP_FILENAME)
-            self._loop_writer = _WavWriter(self._loop_path, loop_ch, loop_rate)
-            self._writers.append(self._loop_writer)
-            self._open_stream(self._loop_info, self._loop_writer, loop_ch, loop_rate)
+            self.loop_path = os.path.join(out_dir, LOOP_FILENAME)
+            self.loop_writer = _WavWriter(self.loop_path, loop_ch, loop_rate)
+            self._open_stream(self._loop_info, self.loop_writer, loop_ch, loop_rate)
             self._start_keepalive()
 
         # Alt er klar — ét fælles nulpunkt, og så i gang. Stilheds-afspilningen
@@ -547,7 +622,7 @@ class _WindowsBackend:
                 self._keepalive = None
 
         start_ts = time.monotonic()
-        for writer in self._writers:
+        for writer in self.writers:
             writer.begin(start_ts)
         for stream in self._streams:
             stream.start_stream()
@@ -577,42 +652,25 @@ class _WindowsBackend:
                 pass
             self._keepalive = None
 
-        for writer in self._writers:
+        for writer in self.writers:
             writer.close()
-        stats = _collect_stats(self._mic_writer, self._loop_writer,
-                               self._mic_path, self._loop_path)
-        self._writers.clear()
-        self._mic_writer = None
-        self._loop_writer = None
-        self._mic_path = None
-        self._loop_path = None
-        return stats
+        return self._take_stats()
 
     def close(self):
         self.stop()
         self._pa.terminate()
 
 
-class _DevBackend:
+class _DevBackend(_Backend):
     """sounddevice: kun mikrofon — til udvikling/test på macOS/Linux."""
 
     def __init__(self, mic_name: str | None = None):
         import sounddevice as sd
 
+        super().__init__()
         self._sd = sd
         self._mic_name = mic_name
         self._stream = None
-        self._mic_writer: _WavWriter | None = None
-        self._mic_path: str | None = None
-        self.has_loopback = False
-
-    @property
-    def mic_level(self) -> float:
-        return self._mic_writer.level if self._mic_writer else 0.0
-
-    @property
-    def loop_level(self) -> float:
-        return 0.0
 
     def list_mics(self) -> list[str]:
         try:
@@ -651,9 +709,9 @@ class _DevBackend:
 
         rate = int(dev["default_samplerate"])
         channels = min(2, max(1, int(dev["max_input_channels"])))
-        self._mic_path = os.path.join(out_dir, MIC_FILENAME)
-        self._mic_writer = _WavWriter(self._mic_path, channels, rate)
-        writer = self._mic_writer
+        self.mic_path = os.path.join(out_dir, MIC_FILENAME)
+        self.mic_writer = _WavWriter(self.mic_path, channels, rate)
+        writer = self.mic_writer
 
         def callback(indata, frames, time_info, status):
             writer.mark_first_buffer()
@@ -677,12 +735,9 @@ class _DevBackend:
             self._stream.stop()
             self._stream.close()
             self._stream = None
-        if self._mic_writer is not None:
-            self._mic_writer.close()
-        stats = _collect_stats(self._mic_writer, None, self._mic_path, None)
-        self._mic_writer = None
-        self._mic_path = None
-        return stats
+        if self.mic_writer is not None:
+            self.mic_writer.close()
+        return self._take_stats()
 
     def close(self):
         self.stop()

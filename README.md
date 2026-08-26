@@ -17,8 +17,8 @@ så det eksisterende bibliotek ikke knækker.
 Lydbalancen kan justeres både under optagelsen og i gem-dialogen — mixet sker
 først når der trykkes Gem. **▶ Lyt** i gem-dialogen afspiller mixet med den
 valgte balance, før der gemmes. Var stemmen eller melodien nær-stille under
-optagelsen (glemt mikrofon, musikken spillede ikke), advarer dialogen, før
-der gemmes. Alle sange loudness-normaliseres (EBU R128, kan slås fra i ⚙),
+optagelsen (glemt mikrofon, musikken spillede ikke), eller blev stemmen så
+kraftig at lyden blev forvrænget, advarer dialogen, før der gemmes. Alle sange loudness-normaliseres (EBU R128, kan slås fra i ⚙),
 så afspilningslisten ikke hopper i lydstyrke. Crasher noget undervejs, ligger
 de rå spor stadig klar, og appen tilbyder at gemme dem næste gang den åbnes.
 Mellemrumstasten starter/stopper også optagelsen. Titel-feltet foreslår
@@ -30,6 +30,25 @@ til en anden højttaler — nævner gem-dialogen det bagefter. Er der under
 midt i det hele, siger statuslinjen til med det samme. Appen kan kun køre i
 én instans — endnu et dobbeltklik fronter bare det åbne vindue.
 Fejlsøgning: `%APPDATA%\Sangoptager\app.log`.
+
+**Niveaumetrene** er inddelt i dB som et studiemeter, ikke i lineær amplitude.
+Bunden ligger ved -60 dBFS, og der er lige langt mellem hver 6 dB hele vejen,
+så en aflæsning betyder det samme uanset hvor på bjælken den står: er stregen
+på -6, er der 6 dB tilbage til loftet. To streger på den tomme del af bjælken
+markerer farveskiftene, så skalaen også kan aflæses, når udslaget er lille.
+
+Hver bjælke viser to ting på én gang. **Fyldet** er RMS — den oplevede
+lydstyrke. Den **hvide streg** er sporets højeste sampleværdi (peak), og det er
+den, farverne og dB-udlæsningen hører til: grønt indtil -12 dB, gult derfra,
+rødt fra -6 dB. Afstanden mellem fyld og streg er stemmens dynamik, typisk
+12-15 dB — derfor kan et pænt RMS sagtens dække over toppe der rammer loftet.
+
+Sker det, er det ikke længere en farve, men en **rød blok yderst på bjælken**
+og teksten **KLIP** i stedet for dB-tallet. Først dér er lyden reelt
+forvrænget, og hverken lydbalancen eller normaliseringen kan rette op på det
+bagefter. Klipper stemmen i mere end et sekund i alt, siger gem-dialogen til
+med råd om at synge længere fra mikrofonen eller skrue ned for mikrofonens
+niveau i Windows.
 
 **Synkronisering:** Melodisporet skal dække nøjagtig samme tidsrum som
 mikrofonen — fra Optag til Stop. Det kræver to modtræk, fordi WASAPI-loopback
@@ -87,8 +106,7 @@ halvfærdig, og appen kører videre som før.
 Indstillinger (⚙): valg af **mikrofon** og **melodikilde** (hvilken højttaler
 melodien afspilles på), sync-mappe, kunstnernavn og manuelt opdaterings-tjek. Gemmes i
 `%APPDATA%\Sangoptager\config.json`. Skift til Syncthing = peg bare
-sync-mappen et andet sted hen. Niveaumetrene viser RMS med peak-hold og
-dB-udlæsning, så man kan se at begge kilder har signal, før man synger løs.
+sync-mappen et andet sted hen.
 
 ## Filformat (kompatibelt med det gamle bibliotek)
 

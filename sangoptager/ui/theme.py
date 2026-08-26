@@ -7,6 +7,8 @@ setObjectName ("primary", "danger", "ghost", "titleLabel", ...).
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import (
     QColor,
@@ -31,8 +33,40 @@ RED       = "#e5484d"   # optagelse
 AMBER     = "#f5a524"   # afventer handling
 GREEN     = "#30c463"   # meter
 YELLOW    = "#f1c40f"   # meter
+CLIP      = "#ff2d2d"   # meter: signalet er klippet
 
-METER_GRADIENT = ((0.0, GREEN), (0.62, GREEN), (0.78, YELLOW), (0.92, RED))
+# ── Niveaumeter-skala ────────────────────────────────────────────────────────
+#
+# Bjælken er inddelt i dB som på et rigtigt studiemeter, ikke i lineær
+# amplitude. Det gør både farverne og dB-udlæsningen til noget man kan regne
+# med: står stregen på -6, er der 6 dB til loftet.
+#
+# Farverne ligger på de sædvanlige peak-tærskler — grønt indtil -12 dB, gult
+# derfra, rødt fra -6 dB og op. De gælder peak-stregen; bjælkens fyld er RMS
+# og ligger naturligt 12-15 dB lavere for en stemme.
+
+METER_FLOOR_DB = -60.0
+METER_GRADIENT_DB = ((-60.0, GREEN), (-15.0, GREEN), (-12.0, YELLOW), (-6.0, RED))
+# Streger på den tomme del af bjælken ved farveskiftene. Uden dem kan man kun
+# se skalaen dér, hvor der allerede er udslag — og peak-stregen ville stå på
+# bar bund uden noget at aflæses imod.
+METER_TICKS_DB = (-12.0, -6.0)
+
+
+def meter_position_db(db: float) -> float:
+    """0..1-position på bjælken for et niveau i dBFS. 0 dB = helt ude."""
+    return min(1.0, max(0.0, 1.0 - db / METER_FLOOR_DB))
+
+
+def meter_position(level: float) -> float:
+    """0..1-position på bjælken for et lineært niveau 0..1."""
+    if level <= 0.0:
+        return 0.0
+    return meter_position_db(20.0 * math.log10(level))
+
+
+METER_GRADIENT = tuple((meter_position_db(db), color)
+                       for db, color in METER_GRADIENT_DB)
 
 
 QSS = f"""
