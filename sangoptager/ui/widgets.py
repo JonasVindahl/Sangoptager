@@ -1,11 +1,11 @@
-"""Custom widgets: pro-audio niveaumeter med peak-hold, balance-slider og
-den store optage-knap med pulserende REC-indikator."""
+"""Custom widgets: pro-audio niveaumeter med peak-hold og klip-visning,
+balance-slider og den store optage-knap med pulserende REC-indikator."""
 
 from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -21,28 +21,39 @@ from . import theme
 
 # ── Niveaumeter ──────────────────────────────────────────────────────────────
 
+# Peak-stregen falder ca. 12 dB/sek. Ved 80 ms mellem opdateringer bliver det
+# knap 1 dB pr. kald — langsomt nok til at nå at aflæse toppene.
+_PEAK_FALL = 1.0 / -theme.METER_FLOOR_DB
+
 
 class _MeterBar(QWidget):
-    """Selve bjælken: gradient-fyld + hvid peak-hold-streg."""
+    """Bjælken: RMS-fyld, hvid peak-hold-streg og rød klip-markering.
+
+    Fyld og streg ligger på den samme dB-akse (theme.meter_position), så
+    afstanden mellem dem er stemmens dynamik, og stregens plads i farverne
+    viser, hvor tæt toppene er på loftet. Farverne siger altså noget om
+    peak-stregen — fyldet er RMS og ligger naturligt et godt stykke lavere.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._level = 0.0   # vist niveau 0..1 (perceptuelt)
-        self._peak = 0.0
+        self._level = 0.0     # RMS som 0..1-position på bjælken
+        self._peak = 0.0      # peak-hold som 0..1-position
+        self._clipping = False
         self.setFixedHeight(16)
 
-    def set_level(self, rms: float):
-        disp = math.sqrt(min(1.0, max(0.0, rms)))
-        self._level = disp
-        # Peak-hold der falder langsomt (kaldes ca. hver 80 ms)
-        self._peak = max(disp, self._peak - 0.012)
+    def set_levels(self, rms: float, peak: float, clipping: bool):
+        self._level = theme.meter_position(rms)
+        self._peak = max(theme.meter_position(peak), self._peak - _PEAK_FALL)
+        self._clipping = clipping
         self.update()
 
     def reset(self):
-        if self._level == 0.0 and self._peak == 0.0:
+        if self._level == 0.0 and self._peak == 0.0 and not self._clipping:
             return
         self._level = 0.0
         self._peak = 0.0
+        self._clipping = False
         self.update()
 
     def paintEvent(self, event):
@@ -56,7 +67,17 @@ class _MeterBar(QWidget):
 
         painter.fillRect(rect, QColor(theme.SURFACE_2))
 
-        if self._level > 0.003:
+        # Skalamærker ved farveskiftene, så -12 og -6 dB kan aflæses, også
+        # når bjælken står lavt og farverne endnu ikke er nået derop
+        tick = QColor(theme.BORDER).lighter(150)
+        for db in theme.METER_TICKS_DB:
+            x = rect.left() + rect.width() * theme.meter_position_db(db)
+            painter.fillRect(QRectF(x - 0.5, rect.top(), 1.0, rect.height()),
+                             tick)
+
+        if self._level > 0.0:
+            # Gradienten spænder hele bjælken, ikke kun fyldet, så farverne
+            # bliver ved med at betyde de samme dB uanset udslaget
             grad = QLinearGradient(rect.left(), 0, rect.right(), 0)
             for stop, color in theme.METER_GRADIENT:
                 grad.setColorAt(stop, QColor(color))
@@ -64,10 +85,19 @@ class _MeterBar(QWidget):
             fill.setWidth(rect.width() * self._level)
             painter.fillRect(fill, grad)
 
-        if self._peak > 0.01:
+        if self._peak > 0.0:
             x = rect.left() + rect.width() * self._peak
             painter.fillRect(QRectF(x - 1.5, rect.top(), 2.5, rect.height()),
                              QColor(255, 255, 255, 190))
+
+        if self._clipping:
+            # Massiv blok yderst i skalaen — det er dén, og ikke et højt
+            # udslag, der betyder at lyden faktisk bliver forvrænget
+            width = max(6.0, rect.width() * 0.05)
+            painter.fillRect(
+                QRectF(rect.right() - width, rect.top(), width, rect.height()),
+                QColor(theme.CLIP),
+            )
 
         painter.setClipping(False)
         painter.setPen(QColor(theme.BORDER))
@@ -76,10 +106,17 @@ class _MeterBar(QWidget):
 
 
 class LevelMeter(QWidget):
-    """Navn + bjælke + dB-udlæsning, f.eks.  Stemme ▓▓▓▓░░░░  -18 dB"""
+    """Navn + bjælke + dB-udlæsning, f.eks.  Stemme ▓▓▓▓░░░░  -12 dB
+
+    Udlæsningen er sporets højeste sampleværdi (peak) i dBFS — samme tal som
+    den hvide streg på bjælken. Det er dét, der siger noget om afstanden til
+    loftet; klipper signalet, står der KLIP i stedet.
+    """
 
     def __init__(self, label: str, parent=None):
         super().__init__(parent)
+        self._clipping = False
+        self._db_font_px = 11
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
@@ -104,17 +141,33 @@ class LevelMeter(QWidget):
         self._name.setMinimumWidth(round(64 * s))
         self._name.setStyleSheet(f"font-size: {round(12 * s)}px;")
         self._db.setMinimumWidth(round(52 * s))
-        self._db.setStyleSheet(f"font-size: {round(11 * s)}px;")
+        self._db_font_px = round(11 * s)
+        self._restyle_db()
 
-    def set_level(self, rms: float):
-        self._bar.set_level(rms)
-        if rms > 0.0005:
-            self._db.setText(f"{max(-60, 20 * math.log10(rms)):.0f} dB")
+    def _restyle_db(self):
+        """Rød udlæsning mens signalet klipper. Kaldes kun ved skift — et nyt
+        stylesheet koster en gennemregning af hele widgeten."""
+        color = f" color: {theme.CLIP};" if self._clipping else ""
+        self._db.setStyleSheet(f"font-size: {self._db_font_px}px;{color}")
+
+    def set_levels(self, rms: float, peak: float, clipping: bool = False):
+        self._bar.set_levels(rms, peak, clipping)
+        if clipping != self._clipping:
+            self._clipping = clipping
+            self._restyle_db()
+        if clipping:
+            self._db.setText("KLIP")
+        elif peak > 0.0:
+            db = max(theme.METER_FLOOR_DB, 20 * math.log10(peak))
+            self._db.setText(f"{db:.0f} dB")
         else:
             self._db.setText("–∞ dB")
 
     def reset(self):
         self._bar.reset()
+        if self._clipping:
+            self._clipping = False
+            self._restyle_db()
         self._db.setText("–∞ dB")
 
     def set_enabled_look(self, enabled: bool):

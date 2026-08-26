@@ -38,8 +38,7 @@ def _is_sync_conflict(filename: str) -> bool:
 def sanitize_title(title: str) -> str:
     """Rens en titel så den kan indgå i et filnavn. Æøå bevares."""
     cleaned = _UNSAFE_CHARS.sub(" ", title)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
-    return cleaned
+    return re.sub(r"\s+", " ", cleaned).strip(" .")
 
 
 def invert_datetime(iso_dt: str) -> str:
@@ -88,7 +87,7 @@ def parse_filename(filename: str):
         return (title, f"{year}-{month}-{day}_{hh}-{mi}-{ss}") if title else None
 
     # Gammelt format: Titel_DD-MM-YYYY_HH-MM-SS
-    m = DATE_PAT.match(parts[-2]) if len(parts) >= 3 else None
+    m = DATE_PAT.match(parts[-2])
     if m and TIME_PAT.match(parts[-1]):
         day, month, year = m.group(1), m.group(2), m.group(3)
         hh, mi, ss = parts[-1].split("-")

@@ -41,6 +41,11 @@ LOOP_TAIL_SILENCE_S = 20.0
 # videoen hakkede eller blev sat på pause.
 BIG_GAP_S = 2.0
 
+# Så meget klippet lyd udløser en advarsel. Klip tælles pr. buffer (23 ms), så
+# en enkelt hård konsonant koster allerede et par tiendedele — grænsen skal
+# ligge højt nok til, at kun hørbar forvrængning når frem til brugeren.
+CLIPPING_S = 1.0
+
 
 class _PreviewWorker(QThread):
     done = Signal(str)
@@ -149,41 +154,45 @@ class SaveDialog(QDialog):
     # ── Advarsler ──────────────────────────────────────────────────────────
 
     def _warnings(self) -> list[str]:
+        """Alt der er værd at vide, før der gemmes. Måletallene mangler på en
+        optagelse gendannet efter et crash — så springes de tjek over."""
+        mic, loop = self._result.mic, self._result.loop
         warnings = []
         if self._result.disk_failed:
             warnings.append(
                 "Disken svigtede under optagelsen, så sangen kan være "
                 "afkortet. Lyt den igennem, før du gemmer."
             )
-        peak = self._result.mic_peak
-        if peak is not None and peak < SILENCE_PEAK:
+        if mic is not None and mic.rms_peak < SILENCE_PEAK:
             warnings.append(
                 "Stemmen var meget lav eller helt stille under optagelsen — "
                 "tjek mikrofonen, før du gemmer."
             )
-        peak = self._result.loop_peak
-        if self._result.loop_path is not None and peak is not None \
-                and peak < SILENCE_PEAK:
+        elif mic is not None and mic.clipped_seconds >= CLIPPING_S:
+            # Sample-værdier i loftet: hørbar forvrængning, som hverken
+            # balancen eller normaliseringen kan rette op på bagefter
+            warnings.append(
+                f"Stemmen var så kraftig, at lyden blev forvrænget i "
+                f"{mic.clipped_seconds:.0f} sekunder. Syng lidt længere fra "
+                "mikrofonen, eller skru ned for mikrofonens niveau i Windows."
+            )
+        if loop is not None and loop.rms_peak < SILENCE_PEAK:
             warnings.append(
                 "Melodien var næsten stille — spillede musikken på PC'en?"
             )
-        elif self._result.loop_path is not None \
-                and self._result.loop_tail_silence is not None \
-                and self._result.loop_tail_silence >= LOOP_TAIL_SILENCE_S \
+        elif loop is not None and loop.tail_silence >= LOOP_TAIL_SILENCE_S \
                 and self._result.duration > LOOP_TAIL_SILENCE_S * 2:
             # Melodien havde signal, men forsvandt undervejs — typisk fordi
             # lyden skiftede til en anden enhed (Bluetooth-hovedtelefoner)
             warnings.append(
-                f"Melodien forsvandt de sidste "
-                f"{int(self._result.loop_tail_silence)} sekunder — skiftede "
-                "lyden til en anden højttaler undervejs?"
+                f"Melodien forsvandt de sidste {int(loop.tail_silence)} "
+                "sekunder — skiftede lyden til en anden højttaler undervejs?"
             )
-        gaps = self._result.loop_gaps
-        if gaps.count and gaps.seconds >= BIG_GAP_S:
+        if loop is not None and loop.gaps and loop.gaps.seconds >= BIG_GAP_S:
             warnings.append(
-                f"Melodien tav i alt {gaps.seconds:.0f} sekunder undervejs — "
-                "spillede videoen uafbrudt? Optagelsen er tidsmæssigt korrekt, "
-                "men lyt den igennem."
+                f"Melodien tav i alt {loop.gaps.seconds:.0f} sekunder undervejs "
+                "— spillede videoen uafbrudt? Optagelsen er tidsmæssigt "
+                "korrekt, men lyt den igennem."
             )
         if self._result.overflows > 0:
             warnings.append(
@@ -191,7 +200,7 @@ class SaveDialog(QDialog):
                 "undervejs. Lyt den igennem, før du gemmer."
             )
         if warnings:
-            log.warning("Stilheds-advarsel ved gem: %s", "; ".join(warnings))
+            log.warning("Advarsel ved gem: %s", "; ".join(warnings))
         return warnings
 
     # ── Prøvelyt ───────────────────────────────────────────────────────────
@@ -272,17 +281,21 @@ class SaveDialog(QDialog):
         if answer == QMessageBox.Yes:
             self._finish(("delete",))
 
-    def _finish(self, action: tuple):
+    def _release_preview(self):
+        """Stop afspilningen og vent mixer-tråden ud — en QThread må ikke
+        destrueres mens den kører, og filhåndtaget skal slippes, før
+        temp-mappen kan ryddes på Windows."""
         self._stop_playback()
         if self._preview_worker is not None and self._preview_worker.isRunning():
             self._preview_worker.wait(15_000)
+
+    def _finish(self, action: tuple):
+        self._release_preview()
         self.result_action = action
         self.accept()
 
     def closeEvent(self, event):
-        self._stop_playback()
-        if self._preview_worker is not None and self._preview_worker.isRunning():
-            self._preview_worker.wait(15_000)
+        self._release_preview()
         # Luk med X = behold intet valg; hovedvinduet spørger igen næste gang
         if self.result_action is None:
             self.result_action = ("keep",)

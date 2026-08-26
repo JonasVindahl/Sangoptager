@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import datetime
+import math
 import os
 import shutil
-import sys
 import time
 import wave
 
@@ -33,6 +33,7 @@ from ..audio.capture import (
     CaptureError,
     DualRecorder,
     RecordingResult,
+    TrackStats,
 )
 from ..audio.mixdown import MixdownError, mixdown
 from ..library import (
@@ -99,13 +100,14 @@ class SaveWorker(QThread):
 
             # MP3'en er på plads — flyt de rå spor til "sort boks"-arkivet,
             # så en skæv optagelse kan re-mixes i stedet for at synges om
+            loop = self._result.loop
             archive_recording(
                 self._result.mic_path, self._result.loop_path,
                 now.strftime("%Y-%m-%d_%H-%M-%S_") + self._title,
                 dict(titel=self._title, destination=dest,
                      balance=self._balance, normalize=self._settings.normalize,
-                     udfyldte_huller=self._result.loop_gaps.count,
-                     udfyldt_sek=round(self._result.loop_gaps.seconds, 2),
+                     udfyldte_huller=loop.gaps.count if loop else 0,
+                     udfyldt_sek=round(loop.gaps.seconds, 2) if loop else 0.0,
                      overflows=self._result.overflows),
             )
             _cleanup_temp()
@@ -139,6 +141,47 @@ class TitlesWorker(QThread):
             log.warning("Kunne ikke læse titler fra biblioteket: %s", exc)
 
 
+def _dbfs(level: float) -> str:
+    return f"{20 * math.log10(level):.1f} dB" if level > 0.0 else "-inf dB"
+
+
+def _describe_track(name: str, track: TrackStats) -> str:
+    clipped = (f", KLIPPET {track.clipped_seconds:.1f} sek"
+               if track.clipped_seconds else "")
+    return (f"{name} peak={_dbfs(track.true_peak)} "
+            f"rms={_dbfs(track.rms_peak)} {track.seconds:.1f} sek{clipped}")
+
+
+def _log_recording(result: RecordingResult) -> None:
+    """Optagelsens måletal i loggen — første sted at kigge, når noget undrer.
+
+    Peak og RMS står side om side med vilje: et pænt RMS udelukker ikke
+    klippede toppe, og det er kun peaken der afslører forvrængning.
+    """
+    tracks = [_describe_track(name, track)
+              for name, track in (("stemme", result.mic), ("melodi", result.loop))
+              if track is not None]
+    log.info("Optagelse stoppet: %.1f sek, overflows=%d | %s",
+             result.duration, result.overflows,
+             " | ".join(tracks) or "ingen måletal")
+
+    if result.loop is not None and result.loop.gaps:
+        log.info("Melodien tav %d gang(e), i alt %.1f sek — fyldt ud med "
+                 "stilhed, så sporet ikke mister tid",
+                 result.loop.gaps.count, result.loop.gaps.seconds)
+    if result.mic is not None and result.mic.gaps:
+        log.warning("Mikrofonen tav %d gang(e), i alt %.1f sek — usædvanligt",
+                    result.mic.gaps.count, result.mic.gaps.seconds)
+    # Sporene skal dække samme tidsrum uanset hvad. Gør de ikke det, er der
+    # noget, udfyldningen ikke fangede
+    if result.mic is not None and result.loop is not None:
+        drift = abs(result.mic.seconds - result.loop.seconds)
+        if drift > 0.25:
+            log.warning("Sporlængder afviger %.0f ms trods udfyldning — "
+                        "melodien kan ligge forskudt i denne optagelse",
+                        drift * 1000)
+
+
 def _pending_recording() -> RecordingResult | None:
     """Ligger der en ikke-gemt optagelse fra en tidligere (crashet) kørsel?"""
     tmp = temp_recording_dir()
@@ -169,7 +212,7 @@ class MainWindow(QMainWindow):
         self._titles_worker: TitlesWorker | None = None
         self._failed_result: RecordingResult | None = None
         self._started_at = 0.0
-        self._disk_warned = False
+        self._reset_mic_watchdog()
 
         self._build_ui()
         if self.settings.window_geometry:
@@ -192,6 +235,7 @@ class MainWindow(QMainWindow):
 
         self._update_check: UpdateCheckWorker | None = None
         self._update_dl: UpdateDownloadWorker | None = None
+        self._update_info: UpdateInfo | None = None
         self._failed_update_tag: str | None = None
         self._check_previous_update()
         if can_self_update():
@@ -393,13 +437,21 @@ class MainWindow(QMainWindow):
             self._elapsed = time.monotonic() - self._started_at
             mins, secs = divmod(int(self._elapsed), 60)
             self.timer_label.setText(f"{mins:02d}:{secs:02d}")
-            self.mic_meter.set_level(self.recorder.mic_level)
-            self.loop_meter.set_level(self.recorder.loop_level)
+            self.mic_meter.set_levels(*self.recorder.mic_levels)
+            self.loop_meter.set_levels(*self.recorder.loop_levels)
             self._watch_mic()
         elif not self.recording:
             self.mic_meter.reset()
             if self.recorder is None or self.recorder.has_loopback:
                 self.loop_meter.reset()
+
+    def _reset_mic_watchdog(self):
+        """Nulstil vagthunden. -1 som startværdi, så den første poll altid
+        ser en ændring og ikke tæller stilstand med fra før optagelsen."""
+        self._mic_watch_bytes = -1
+        self._mic_watch_stall = 0.0
+        self._mic_stalled = False
+        self._disk_warned = False
 
     def _watch_mic(self):
         """Alarm hvis mikrofonen holder op med at levere data midt i optagelsen
@@ -489,10 +541,7 @@ class MainWindow(QMainWindow):
         self.recording = True
         self._elapsed = 0.0
         self._started_at = time.monotonic()
-        self._mic_watch_bytes = -1
-        self._mic_watch_stall = 0.0
-        self._mic_stalled = False
-        self._disk_warned = False
+        self._reset_mic_watchdog()
         self.record_btn.set_state("recording")
         self.status.showMessage("Optager…")
         log.info("Optagelse startet (%s)", self.recorder.device_summary())
@@ -502,25 +551,7 @@ class MainWindow(QMainWindow):
         self.recording = False
         self.record_btn.set_state("idle")
         self.status.showMessage("Optagelse stoppet")
-        p = self.pending
-        log.info("Optagelse stoppet: %.1f sek, peak stemme=%s melodi=%s, "
-                 "overflows=%d, sporlængder=%s/%s sek",
-                 p.duration, p.mic_peak, p.loop_peak,
-                 p.overflows, p.mic_seconds, p.loop_seconds)
-        if p.loop_gaps:
-            log.info("Melodien tav %d gang(e), i alt %.1f sek — fyldt ud med "
-                     "stilhed, så sporet ikke mister tid", p.loop_gaps.count,
-                     p.loop_gaps.seconds)
-        if p.mic_gaps:
-            log.warning("Mikrofonen tav %d gang(e), i alt %.1f sek — usædvanligt",
-                        p.mic_gaps.count, p.mic_gaps.seconds)
-        # Sporene skal nu dække samme tidsrum uanset hvad. Gør de ikke det,
-        # er der noget, udfyldningen ikke fangede
-        if p.mic_seconds and p.loop_seconds \
-                and abs(p.mic_seconds - p.loop_seconds) > 0.25:
-            log.warning("Sporlængder afviger %.0f ms trods udfyldning — "
-                        "melodien kan ligge forskudt i denne optagelse",
-                        abs(p.mic_seconds - p.loop_seconds) * 1000)
+        _log_recording(self.pending)
         self._resolve_pending()
 
     def _resolve_pending(self):
@@ -697,6 +728,10 @@ class MainWindow(QMainWindow):
             self._show_manual_update_banner(self._update_info.tag)
             self.status.showMessage("⚠ Opdatering mislykkedes — hent manuelt")
             return
+        finally:
+            # Zippen og den udpakkede kopi fylder let 200 MB — de har gjort
+            # deres nu, uanset om udskiftningen lykkedes
+            shutil.rmtree(tmp_root, ignore_errors=True)
         self.update_label.setText("Genstarter…")
         launch_new_version()
         self.close()
