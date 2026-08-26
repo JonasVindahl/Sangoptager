@@ -63,6 +63,12 @@ præ-release-version ville altså aldrig blive tilbudt til nogen.
 Der sammenlignes som talrække, ikke som tekst, så `1.9.0 < 1.10.0` er rigtigt
 af sig selv. Ingen nulpolstring.
 
+**Altid tre led** — `major.minor.patch`. Python lader den korteste tuple tabe,
+så `(1, 16)` er *mindre* end `(1, 16, 0)`. Stod der `"1.16"` i koden, mens
+releaset hed `v1.16.0`, ville appen regne sig selv for ældre og tilbyde den
+samme opdatering ved hver eneste opstart — og blive ved, for opdateringen
+ville jo aldrig ændre noget.
+
 ### Hvornår bumpes hvad
 
 | Led | Hvornår |
