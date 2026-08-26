@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime
 import os
 import shutil
-import sys
 import time
 import wave
 
@@ -169,7 +168,7 @@ class MainWindow(QMainWindow):
         self._titles_worker: TitlesWorker | None = None
         self._failed_result: RecordingResult | None = None
         self._started_at = 0.0
-        self._disk_warned = False
+        self._reset_mic_watchdog()
 
         self._build_ui()
         if self.settings.window_geometry:
@@ -192,6 +191,7 @@ class MainWindow(QMainWindow):
 
         self._update_check: UpdateCheckWorker | None = None
         self._update_dl: UpdateDownloadWorker | None = None
+        self._update_info: UpdateInfo | None = None
         self._failed_update_tag: str | None = None
         self._check_previous_update()
         if can_self_update():
@@ -401,6 +401,14 @@ class MainWindow(QMainWindow):
             if self.recorder is None or self.recorder.has_loopback:
                 self.loop_meter.reset()
 
+    def _reset_mic_watchdog(self):
+        """Nulstil vagthunden. -1 som startværdi, så den første poll altid
+        ser en ændring og ikke tæller stilstand med fra før optagelsen."""
+        self._mic_watch_bytes = -1
+        self._mic_watch_stall = 0.0
+        self._mic_stalled = False
+        self._disk_warned = False
+
     def _watch_mic(self):
         """Alarm hvis mikrofonen holder op med at levere data midt i optagelsen
         (USB hevet ud, Bluetooth død), eller hvis disken svigter. Kun mic —
@@ -489,10 +497,7 @@ class MainWindow(QMainWindow):
         self.recording = True
         self._elapsed = 0.0
         self._started_at = time.monotonic()
-        self._mic_watch_bytes = -1
-        self._mic_watch_stall = 0.0
-        self._mic_stalled = False
-        self._disk_warned = False
+        self._reset_mic_watchdog()
         self.record_btn.set_state("recording")
         self.status.showMessage("Optager…")
         log.info("Optagelse startet (%s)", self.recorder.device_summary())
@@ -697,6 +702,10 @@ class MainWindow(QMainWindow):
             self._show_manual_update_banner(self._update_info.tag)
             self.status.showMessage("⚠ Opdatering mislykkedes — hent manuelt")
             return
+        finally:
+            # Zippen og den udpakkede kopi fylder let 200 MB — de har gjort
+            # deres nu, uanset om udskiftningen lykkedes
+            shutil.rmtree(tmp_root, ignore_errors=True)
         self.update_label.setText("Genstarter…")
         launch_new_version()
         self.close()

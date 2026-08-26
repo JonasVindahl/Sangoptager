@@ -272,17 +272,21 @@ class SaveDialog(QDialog):
         if answer == QMessageBox.Yes:
             self._finish(("delete",))
 
-    def _finish(self, action: tuple):
+    def _release_preview(self):
+        """Stop afspilningen og vent mixer-tråden ud — en QThread må ikke
+        destrueres mens den kører, og filhåndtaget skal slippes, før
+        temp-mappen kan ryddes på Windows."""
         self._stop_playback()
         if self._preview_worker is not None and self._preview_worker.isRunning():
             self._preview_worker.wait(15_000)
+
+    def _finish(self, action: tuple):
+        self._release_preview()
         self.result_action = action
         self.accept()
 
     def closeEvent(self, event):
-        self._stop_playback()
-        if self._preview_worker is not None and self._preview_worker.isRunning():
-            self._preview_worker.wait(15_000)
+        self._release_preview()
         # Luk med X = behold intet valg; hovedvinduet spørger igen næste gang
         if self.result_action is None:
             self.result_action = ("keep",)

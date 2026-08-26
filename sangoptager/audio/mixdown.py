@@ -11,7 +11,7 @@ lydstyrke uden at ducke stemme og melodi i forhold til hinanden.
 
 from __future__ import annotations
 
-import json as _json
+import json
 import math
 import os
 import re
@@ -22,6 +22,11 @@ import sys
 from ..logsetup import log
 
 MP3_BITRATE = "320k"
+
+# CREATE_NO_WINDOW: ellers blinker en sort konsol forbi, hver gang den
+# vinduesløse exe kalder ffmpeg
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+_NULL_SINK = "NUL" if sys.platform == "win32" else "/dev/null"
 
 
 class MixdownError(RuntimeError):
@@ -73,7 +78,7 @@ def _parse_loudnorm_stats(stderr: str) -> dict | None:
     cleaned = re.sub(r'\[Parsed_loudnorm_\d+ @ 0x[0-9a-f]+\]\s*', '', stderr)
     for match in reversed(list(re.finditer(r'\{[^{}]+\}', cleaned, re.DOTALL))):
         try:
-            stats = _json.loads(match.group())
+            stats = json.loads(match.group())
             if 'input_i' in stats:
                 return stats
         except ValueError:
@@ -125,21 +130,25 @@ def build_filter(mic_gain: float, loop_gain: float, normalize: bool,
     return _build_mix(mic_gain, loop_gain, finisher, two_inputs)
 
 
+def _run_ffmpeg(ffmpeg: str, inputs: list[str], filt: str, loglevel: str,
+                tail: list[str]) -> subprocess.CompletedProcess:
+    """Kør ffmpeg med de givne input, filterkæde og output-argumenter."""
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", loglevel]
+    for path in inputs:
+        cmd += ["-i", path]
+    cmd += ["-filter_complex", filt, *tail]
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          creationflags=_NO_WINDOW)
+
+
 def _measure_loudness(ffmpeg: str, inputs: list[str], mic_gain: float,
                       loop_gain: float, two_inputs: bool) -> dict | None:
     """Første gennemløb: mål lydstyrke uden at skrive output."""
     filt = _build_mix(mic_gain, loop_gain,
                       f"{_LOUDNORM}:print_format=json", two_inputs)
-    null_out = "NUL" if sys.platform == "win32" else "/dev/null"
-    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "info"]
-    for path in inputs:
-        cmd += ["-i", path]
-    cmd += ["-filter_complex", filt, "-f", "null", null_out]
-
-    creationflags = 0x08000000 if sys.platform == "win32" else 0
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              creationflags=creationflags)
+        proc = _run_ffmpeg(ffmpeg, inputs, filt, "info",
+                           ["-f", "null", _NULL_SINK])
     except OSError:
         return None
     if proc.returncode != 0:
@@ -187,23 +196,13 @@ def mixdown(
 
     filt = _build_mix(mic_gain, loop_gain, finisher, two_inputs)
 
-    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
-    for path in inputs:
-        cmd += ["-i", path]
-
-    cmd += [
-        "-filter_complex", filt,
-        "-ar", "44100",
-        "-codec:a", "libmp3lame",
-        "-b:a", MP3_BITRATE,
-        out_mp3,
-    ]
-
-    creationflags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, creationflags=creationflags
-        )
+        proc = _run_ffmpeg(ffmpeg, inputs, filt, "error", [
+            "-ar", "44100",
+            "-codec:a", "libmp3lame",
+            "-b:a", MP3_BITRATE,
+            out_mp3,
+        ])
     except OSError as exc:
         raise MixdownError(f"Kunne ikke starte ffmpeg: {exc}") from exc
 

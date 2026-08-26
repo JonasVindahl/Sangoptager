@@ -344,15 +344,11 @@ class DualRecorder:
         return self._backend.list_loopbacks()
 
     def start(self, out_dir: str):
-        import time
-
         os.makedirs(out_dir, exist_ok=True)
         self._backend.start(out_dir)
         self._start_time = time.monotonic()
 
     def stop(self) -> RecordingResult:
-        import time
-
         if self._start_time is not None:
             self._duration = time.monotonic() - self._start_time
             self._start_time = None
@@ -492,7 +488,6 @@ class _WindowsBackend:
         """
         pyaudio = self._pa_module
         try:
-            index = self._loop_info.get("hostApiSpecificStreamInfo") or {}
             device = self._loop_info["index"]
             # Loopback-enheden peger på det render-endpoint vi vil holde vågent
             rate = int(self._loop_info["defaultSampleRate"])

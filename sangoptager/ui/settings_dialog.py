@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
+from ..logsetup import log
 from ..settings import Settings
 from ..update import UpdateCheckWorker
 
@@ -131,6 +132,8 @@ class SettingsDialog(QDialog):
         self._check_btn.setEnabled(True)
 
     def _update_check_failed(self, message: str):
+        # Den tekniske fejl hører hjemme i loggen, ikke i dialogen
+        log.info("Manuelt opdaterings-tjek fejlede: %s", message)
         self._update_status.setText(
             f"Kunne ikke tjekke lige nu (er der internet?) — v{__version__}"
         )

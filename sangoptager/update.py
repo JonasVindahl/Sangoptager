@@ -299,6 +299,7 @@ def launch_new_version() -> None:
                      cwd=install_dir())
     log.info("Ny version startet: %s", exe)
 
+
 class UpdateCheckWorker(QThread):
     """Tjek for ny version.
 
