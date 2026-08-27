@@ -12,6 +12,7 @@ from sangoptager.update import file_sha256, is_newer, parse_sha256
     ("v1.10.0", "1.9.0", True),     # numerisk, ikke leksikografisk
     ("ugyldig-tag", "1.1.0", False),
     ("", "1.1.0", False),
+    ("v1.16.0", "1.16", True),   # 2-led-tag i koden ved siden af v1.16.0 → tilbydes altid
 ])
 def test_is_newer(remote, current, expected):
     assert is_newer(remote, current) is expected
