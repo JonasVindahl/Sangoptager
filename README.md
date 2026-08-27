@@ -16,7 +16,7 @@ så det eksisterende bibliotek ikke knækker.
 
 Lydbalancen kan justeres både under optagelsen og i gem-dialogen — mixet sker
 først når der trykkes Gem. **▶ Lyt** i gem-dialogen afspiller mixet med den
-valgte balance, før der gemmes. Var stemmen eller melodien nær-stille under
+valgte balance, før der gemmes. Var stemmen eller melodien næsten stille under
 optagelsen (glemt mikrofon, musikken spillede ikke), eller blev stemmen så
 kraftig at lyden blev forvrænget, advarer dialogen, før der gemmes. Alle sange loudness-normaliseres (EBU R128, kan slås fra i ⚙),
 så afspilningslisten ikke hopper i lydstyrke. Crasher noget undervejs, ligger
@@ -135,12 +135,16 @@ python3 -m venv .venv
 
 Hvert push til `main` bygger appen på en Windows-runner i skyen: tests køres,
 ffmpeg hentes og bundles, og den færdige app uploades som artifact
-(**Actions-fanen → seneste kørsel → "Sangoptager-windows"**).
+(**Actions-fanen → seneste kørsel → "Sangoptager-windows"**; workflow'en ligger
+i [`.github/workflows/build.yml`](.github/workflows/build.yml)).
 Zippen indeholder ALT — Python, Qt, lydbiblioteker og ffmpeg — så på
 mål-PC'en er det bare: pak ud → dobbeltklik `Sangoptager.exe`.
 
-Tag en version (fx `git tag v1.0.0 && git push --tags`) for at få en
-GitHub Release med en færdig `Sangoptager-windows.zip`.
+Release sker automatisk: når `__version__` i
+[`sangoptager/__init__.py`](sangoptager/__init__.py) er bumpet (og ikke allerede
+udgivet) på `main`, opretter workflow'en selv tagget `v<version>` og en
+GitHub Release med den færdige `Sangoptager-windows.zip` — der laves altså
+aldrig tags eller releases i hånden.
 
 Bemærk: Første gang appen startes, kan Windows SmartScreen advare, fordi
 exe'en ikke er kodesigneret — vælg "Flere oplysninger" → "Kør alligevel".
@@ -171,4 +175,4 @@ er nødvendig på hans maskine.
 | `sangoptager/ui/` | PySide6-GUI: hovedvindue, gem-dialog, indstillinger |
 | `sangoptager/settings.py` | `config.json` + temp-mappe til rå spor |
 
-Det gamle system ligger i `V1_OBS.zip` som reference.
+Det gamle system ligger i [`V1_OBS.zip`](V1_OBS.zip) som reference.
